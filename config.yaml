@@ -1,0 +1,39 @@
+---
+name: PiKaraoke
+version: "1.23.0"
+slug: pikaraoke
+description: YouTube-based karaoke machine, running as a Home Assistant add-on
+url: https://github.com/vicwomg/pikaraoke
+arch:
+  - aarch64
+  - amd64
+init: false
+startup: services
+boot: auto
+ingress: true
+ingress_port: 5555
+ingress_stream: true
+panel_icon: mdi:music-note
+panel_title: PiKaraoke
+panel_admin: false
+ports:
+  5555/tcp: 5555
+map:
+  - share:rw
+  - app_config:rw
+options:
+  admin_password: ""
+  song_folder: /share/pikaraoke
+  high_quality: false
+  autoplay: true
+  streaming_format: hls
+  fetch_lyrics: true
+  url: ""
+schema:
+  admin_password: password?
+  song_folder: str
+  high_quality: bool
+  autoplay: bool
+  streaming_format: list(hls|mp4)
+  fetch_lyrics: bool
+  url: str

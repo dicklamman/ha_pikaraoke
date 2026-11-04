@@ -1,0 +1,7 @@
+# The add-on entrypoint is run by the container's shell, so it needs LF endings
+# regardless of where it was edited.
+*.sh text eol=lf
+
+# The extension patch is applied inside the Linux container, where git rejects
+# CRLF line endings in a diff.
+extension/*.patch text eol=lf

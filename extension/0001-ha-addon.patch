@@ -1,0 +1,1096 @@
+diff --git a/pikaraoke/app.py b/pikaraoke/app.py
+index 896469e..0de5d1f 100644
+--- a/pikaraoke/app.py
++++ b/pikaraoke/app.py
+@@ -17,6 +17,7 @@ from urllib.parse import quote, urlsplit
+ 
+ import flask_babel
+ from flask import Flask, request, session
++from flask.sessions import SecureCookieSessionInterface
+ from flask_babel import Babel
+ from flask_socketio import SocketIO
+ 
+@@ -33,7 +34,7 @@ from pikaraoke.lib.get_platform import get_platform, has_js_runtime, is_windows
+ from pikaraoke.lib.login_throttle import LoginThrottle
+ from pikaraoke.lib.singer_manager import SINGER_NAME_MAX_LENGTH
+ from pikaraoke.lib.song_manager import SongManager
+-from pikaraoke.lib.url_prefix import BasePathMiddleware
++from pikaraoke.lib.url_prefix import BasePathMiddleware, get_request_base_path
+ from pikaraoke.lib.youtube_dl import upgrade_youtubedl
+ from pikaraoke.routes import API_BLUEPRINTS, INTERNAL_BLUEPRINTS
+ from pikaraoke.routes.socket_events import setup_socket_events
+@@ -77,6 +78,22 @@ app.config["PIKARAOKE_BASE_PATH"] = args.base_path
+ app.config["PIKARAOKE_SOCKETIO_PATH"] = socketio_path
+ app.wsgi_app = BasePathMiddleware(app.wsgi_app, args.base_path)
+ 
++
++# The Ingress path is only known per request (it carries a session token), so
++# the session cookie's path has to follow it. Scoping it to the Ingress mount
++# keeps the cookie off every other path on the host.
++class IngressCookieSessionInterface(SecureCookieSessionInterface):
++    """Scope the session cookie to the path the app is actually served under."""
++
++    def get_cookie_path(self, app: Flask) -> str:
++        script_root = get_request_base_path()
++        if script_root:
++            return script_root
++        return app.config["SESSION_COOKIE_PATH"] or app.config["APPLICATION_ROOT"]
++
++
++app.session_interface = IngressCookieSessionInterface()
++
+ # Globals rather than per-route template args, so every page that extends
+ # base.html agrees: it gates the admin-only nav links on is_admin and renders a
+ # session ribbon from active_session_name, and singer_field gates KJ mode on
+@@ -151,11 +168,19 @@ def get_locale() -> str | None:
+ 
+ @app.context_processor
+ def inject_path_config() -> dict[str, object]:
+-    """Expose path-prefix settings and the singer-name cap to templates."""
++    """Expose path-prefix settings and the singer-name cap to templates.
++
++    Read per request rather than from config: the Ingress path carries a
++    session token, so it differs between requests and is only known then.
++    """
++    base = get_request_base_path() or app.config["PIKARAOKE_BASE_PATH"]
++    socket_path = (
++        f"{base}/socket.io" if base else (app.config["PIKARAOKE_SOCKETIO_PATH"] or "/socket.io")
++    )
+     return {
+-        "base_path": app.config["PIKARAOKE_BASE_PATH"],
+-        "socketio_path": app.config["PIKARAOKE_SOCKETIO_PATH"],
+-        "cookie_path": app.config["SESSION_COOKIE_PATH"],
++        "base_path": base,
++        "socketio_path": socket_path,
++        "cookie_path": base or "/",
+         "singer_name_max_length": SINGER_NAME_MAX_LENGTH,
+     }
+ 
+@@ -287,6 +312,17 @@ def main() -> None:
+     # reads a False as "flag not passed"), so persist the disable directly.
+     if args.disable_autoplay:
+         k.preferences.set("autoplay", False)
++    elif args.enable_autoplay:
++        # The flag has to be able to turn autoplay back on too: the setting
++        # persists, so a disable would otherwise survive every restart.
++        k.preferences.set("autoplay", True)
++
++    if args.disable_fetch_lyrics:
++        k.preferences.set("fetch_lyrics", False)
++    elif args.fetch_lyrics:
++        # Same as autoplay: the setting persists, so only an explicit disable
++        # can turn lyrics off again.
++        k.preferences.set("fetch_lyrics", True)
+ 
+     # expose karaoke object to the flask app
+     with app.app_context():
+diff --git a/pikaraoke/karaoke.py b/pikaraoke/karaoke.py
+index 7feb447..d643842 100644
+--- a/pikaraoke/karaoke.py
++++ b/pikaraoke/karaoke.py
+@@ -264,7 +264,6 @@ class Karaoke:
+             events=self.events,
+             filename_from_path=self.song_manager.display_name_from_path,
+             streaming_format=self.streaming_format,
+-            base_path=self.url_base_path,
+         )
+ 
+         # Event bridging: the coordinator wires manager events to the UI (SocketIO/notifications).
+diff --git a/pikaraoke/lib/args.py b/pikaraoke/lib/args.py
+index bd43d22..1f49ff9 100644
+--- a/pikaraoke/lib/args.py
++++ b/pikaraoke/lib/args.py
+@@ -185,6 +185,18 @@ def parse_pikaraoke_args() -> argparse.Namespace:
+         help="Let users browse the song library by the folders it is stored in. Adds a Folders view to the Songs page when the library has subdirectories.",
+         required=False,
+     )
++    library.add_argument(
++        "--fetch-lyrics",
++        action="store_true",
++        help="Fetch the song's captions from YouTube when it is downloaded and save them next to it, so the player shows the lyrics.",
++        required=False,
++    )
++    library.add_argument(
++        "--disable-fetch-lyrics",
++        action="store_true",
++        help="Do not fetch lyrics for downloaded songs. Unlike --fetch-lyrics, this can turn lyrics back off after they were switched on, which a stored setting otherwise keeps on.",
++        required=False,
++    )
+ 
+     splash = parser.add_argument_group("Splash screen")
+     splash.add_argument(
+@@ -394,6 +406,12 @@ def parse_pikaraoke_args() -> argparse.Namespace:
+         help="Wait for a manual start before each song instead of playing the next in the queue automatically. The upcoming song sits on the splash screen with a Play button until an admin starts it.",
+         required=False,
+     )
++    queue.add_argument(
++        "--enable-autoplay",
++        action="store_true",
++        help="Play the next queued song automatically. Unlike --disable-autoplay, this can turn autoplay back on after it was switched off, which a stored setting otherwise keeps off.",
++        required=False,
++    )
+     queue.add_argument(
+         "--enable-fair-queue",
+         action="store_true",
+diff --git a/pikaraoke/lib/download_manager.py b/pikaraoke/lib/download_manager.py
+index 3603c13..32c78bf 100644
+--- a/pikaraoke/lib/download_manager.py
++++ b/pikaraoke/lib/download_manager.py
+@@ -13,6 +13,7 @@ from gevent import Greenlet, spawn
+ 
+ from pikaraoke.lib.events import EventSystem
+ from pikaraoke.lib.get_platform import is_windows
++from pikaraoke.lib.lyrics import fetch_lyrics
+ from pikaraoke.lib.preference_manager import PreferenceManager
+ from pikaraoke.lib.queue_manager import QueueManager
+ from pikaraoke.lib.song_manager import SongManager
+@@ -440,6 +441,23 @@ class DownloadManager:
+         )
+         return True
+ 
++    def _fetch_lyrics(self, video_url: str, song_path: str) -> str | None:
++        """Save the song's lyrics next to it as an .ass sidecar, if the setting is on.
++
++        The lyrics ride along with the song, so the player shows them without
++        anyone fetching anything. A video with no captions leaves the song
++        without one, which is not a failure.
++        """
++        if not self._preferences.get_or_default("fetch_lyrics"):
++            return None
++        try:
++            return fetch_lyrics(video_url, song_path)
++        except OSError as e:
++            # The song is downloaded and playable either way, so a lyrics
++            # failure must not take the download down with it.
++            logging.warning("Could not fetch lyrics for %s: %s", song_path, e)
++            return None
++
+     def _execute_download(self, request: dict) -> int:
+         """Execute a video download, re-queueing it if it fails with attempts to spare.
+ 
+@@ -526,6 +544,7 @@ class DownloadManager:
+                     logging.warning("No video ID available to find downloaded song")
+ 
+             if song_path:
++                self._fetch_lyrics(video_url, song_path)
+                 self._events.emit("song_downloaded", song_path, video_id)
+             else:
+                 logging.warning(
+diff --git a/pikaraoke/lib/lyrics.py b/pikaraoke/lib/lyrics.py
+new file mode 100644
+index 0000000..5198673
+--- /dev/null
++++ b/pikaraoke/lib/lyrics.py
+@@ -0,0 +1,180 @@
++"""Fetch synchronized lyrics for a downloaded song as an ASS sidecar file.
++
++PiKaraoke renders an .ass file that sits next to the song file under the same
++base name, so a downloaded song carries its own lyrics onto the player.
++
++The captions come from YouTube itself: yt-dlp lists the tracks a video has,
++and the best one is converted to ASS. Human-authored captions are preferred
++over automatic ones, and the video's own language over a translation.
++"""
++
++import json
++import logging
++import os
++import shutil
++import subprocess
++import tempfile
++
++from pikaraoke.lib.ytdlp_binary import ytdlp_command
++
++# How many caption tracks to try before giving up. Each attempt is a separate
++# yt-dlp run, so the cap keeps a video whose captions cannot be reached from
++# stalling the download queue.
++MAX_TRACK_ATTEMPTS = 3
++
++# How long to wait for yt-dlp. The metadata query and the caption download are
++# both network calls against YouTube, which is slow more often than it is down.
++YTDL_TIMEOUT_SECONDS = 120
++
++# YouTube suffixes an uploader-authored track with the id of the caption set it
++# came from ("en-nP7-2PuUl7o"), and gives an automatic track of the original
++# language the suffix "-orig".
++_ORIG_SUFFIX = "-orig"
++
++
++def _base_language(code: str) -> str:
++    """The language part of a caption code, without YouTube's caption-set id."""
++    return code.split("-")[0]
++
++
++def _read_info(video_url: str) -> dict:
++    """Return yt-dlp's metadata for a video, or an empty dict on failure.
++
++    The metadata is what says which caption tracks exist, so a video without it
++    has nothing to pick from.
++    """
++    cmd = ytdlp_command() + ["-J", "--skip-download", video_url]
++    try:
++        result = subprocess.run(
++            cmd, capture_output=True, text=True, timeout=YTDL_TIMEOUT_SECONDS, check=True
++        )
++    except (subprocess.SubprocessError, OSError) as e:
++        logging.warning("Could not read caption metadata for %s: %s", video_url, e)
++        return {}
++    try:
++        info = json.loads(result.stdout)
++    except ValueError:
++        logging.warning("yt-dlp returned unreadable caption metadata for %s", video_url)
++        return {}
++    if isinstance(info, list):
++        info = info[0] if info else {}
++    return info if isinstance(info, dict) else {}
++
++
++def candidate_tracks(info: dict) -> list[tuple[str, bool]]:
++    """Caption tracks to try, best first, as (language code, is automatic).
++
++    Human-authored captions come first because they are the accurate ones, and
++    the video's own language comes before English, so a song is not sung over a
++    translation of itself.
++
++    Only the original-language automatic track is considered. YouTube offers
++    machine translations of that track in a hundred-odd other languages, and a
++    translated lyric sheet is worse than no lyric sheet.
++    """
++    manual = info.get("subtitles") or {}
++    automatic = info.get("automatic_captions") or {}
++    original = info.get("language") or ""
++
++    candidates: list[tuple[str, bool]] = []
++
++    def add(code: str, is_automatic: bool) -> None:
++        if not code:
++            return
++        available = automatic if is_automatic else manual
++        if code in available and (code, is_automatic) not in candidates:
++            candidates.append((code, is_automatic))
++
++    # Human captions in the language the song is sung in.
++    for code in manual:
++        if original and _base_language(code) == original:
++            add(code, False)
++
++    # The automatic track of the original language.
++    if original:
++        add(f"{original}{_ORIG_SUFFIX}", True)
++    else:
++        for code in automatic:
++            if code.endswith(_ORIG_SUFFIX):
++                add(code, True)
++
++    # Human captions in English, for a song whose own language has none.
++    for code in manual:
++        if _base_language(code) == "en":
++            add(code, False)
++
++    # Any other human captions are still a real lyric sheet.
++    for code in manual:
++        add(code, False)
++
++    return candidates
++
++
++def _fetch_track(video_url: str, code: str, is_automatic: bool, workdir: str) -> str | None:
++    """Download one caption track as ASS into workdir, returning its path.
++
++    Returns None when the track could not be fetched, which is the common case
++    for a track YouTube stops serving. One language per run: yt-dlp converts
++    captions only after every requested language is in, so a single language
++    that fails would cost the others their conversion too.
++    """
++    cmd = ytdlp_command() + [
++        "--skip-download",
++        "--write-auto-subs" if is_automatic else "--write-subs",
++        "--sub-langs",
++        code,
++        "--convert-subs",
++        "ass",
++        "-o",
++        os.path.join(workdir, "%(id)s.%(ext)s"),
++        video_url,
++    ]
++    try:
++        subprocess.run(
++            cmd, capture_output=True, text=True, timeout=YTDL_TIMEOUT_SECONDS, check=True
++        )
++    except (subprocess.SubprocessError, OSError) as e:
++        logging.warning("Could not fetch %s captions for %s: %s", code, video_url, e)
++        return None
++
++    try:
++        converted = [f for f in os.listdir(workdir) if f.endswith(".ass")]
++    except OSError:
++        return None
++    if not converted:
++        return None
++    return os.path.join(workdir, converted[0])
++
++
++def fetch_lyrics(video_url: str, song_path: str) -> str | None:
++    """Save lyrics for a downloaded song next to it as an .ass file.
++
++    Returns the path of the .ass file, or None when the video has no reachable
++    captions. Never raises: a song without lyrics is still a playable song.
++    """
++    target = os.path.splitext(song_path)[0] + ".ass"
++    if os.path.exists(target):
++        return target
++
++    tracks = candidate_tracks(_read_info(video_url))
++    if not tracks:
++        logging.info("No caption tracks available for %s", video_url)
++        return None
++
++    workdir = tempfile.mkdtemp(prefix="pikaraoke-lyrics-")
++    try:
++        for code, is_automatic in tracks[:MAX_TRACK_ATTEMPTS]:
++            source = _fetch_track(video_url, code, is_automatic, workdir)
++            if source is None:
++                continue
++            shutil.move(source, target)
++            logging.info("Saved lyrics for %s to %s", song_path, target)
++            return target
++    except OSError as e:
++        logging.warning("Could not save lyrics for %s: %s", song_path, e)
++        return None
++    finally:
++        shutil.rmtree(workdir, ignore_errors=True)
++
++    logging.info("No lyrics could be fetched for %s", video_url)
++    return None
+diff --git a/pikaraoke/lib/playback_controller.py b/pikaraoke/lib/playback_controller.py
+index f3ce36c..0b5ac51 100644
+--- a/pikaraoke/lib/playback_controller.py
++++ b/pikaraoke/lib/playback_controller.py
+@@ -79,7 +79,6 @@ class PlaybackController:
+         events: EventSystem,
+         filename_from_path: Callable[[str, bool], str],
+         streaming_format: str = "hls",
+-        base_path: str = "",
+     ) -> None:
+         """Initialize the playback controller.
+ 
+@@ -88,12 +87,11 @@ class PlaybackController:
+             events: EventSystem instance for event emission.
+             filename_from_path: Function to extract display name from path.
+             streaming_format: Video streaming format ('hls' or 'mp4').
+-            base_path: URL path prefix when PiKaraoke is hosted under a subpath.
+         """
+         self.preferences = preferences
+         self.events = events
+         self.filename_from_path = filename_from_path
+-        self.stream_manager = StreamManager(preferences, streaming_format, base_path)
++        self.stream_manager = StreamManager(preferences, streaming_format)
+ 
+     @property
+     def ffmpeg_process(self) -> "subprocess.Popen | None":
+diff --git a/pikaraoke/lib/preference_manager.py b/pikaraoke/lib/preference_manager.py
+index 536b9b5..c526bbd 100644
+--- a/pikaraoke/lib/preference_manager.py
++++ b/pikaraoke/lib/preference_manager.py
+@@ -39,6 +39,7 @@ class PreferenceManager:
+         "disable_bg_video": False,
+         "disable_score": False,
+         "autoplay": True,
++        "fetch_lyrics": True,
+         "limit_user_songs_by": 0,
+         "enable_fair_queue": False,
+         "cdg_pixel_scaling": False,
+diff --git a/pikaraoke/lib/stream_manager.py b/pikaraoke/lib/stream_manager.py
+index c6175cd..fa1f724 100644
+--- a/pikaraoke/lib/stream_manager.py
++++ b/pikaraoke/lib/stream_manager.py
+@@ -16,7 +16,6 @@ from pikaraoke.lib.events import EventSystem
+ from pikaraoke.lib.ffmpeg import build_ffmpeg_cmd
+ from pikaraoke.lib.file_resolver import FileResolver, is_transcoding_required
+ from pikaraoke.lib.preference_manager import PreferenceManager
+-from pikaraoke.lib.url_prefix import normalize_url_base_path
+ 
+ 
+ @dataclass
+@@ -83,28 +82,21 @@ class StreamManager:
+         self,
+         preferences: PreferenceManager,
+         streaming_format: str = "hls",
+-        base_path: str = "",
+     ) -> None:
+         """Initialize the stream manager.
+ 
+         Args:
+             preferences: PreferenceManager instance for configuration.
+             streaming_format: Video streaming format ('hls' or 'mp4').
+-            base_path: URL path prefix when PiKaraoke is hosted under a subpath.
+         """
+         self.preferences = preferences
+         self.streaming_format = streaming_format
+         self.ffmpeg_process = None
+         self.ffmpeg_log: Queue | None = None
+-        self.base_path = normalize_url_base_path(base_path)
+         # FileResolver of the transcode currently in flight, so the start
+         # watchdog can probe whether FFmpeg is still producing segments.
+         self._current_fr: FileResolver | None = None
+ 
+-    def _with_base_path(self, path: str) -> str:
+-        """Prefix relative app paths when PiKaraoke is mounted under a subpath."""
+-        return f"{self.base_path}{path}" if self.base_path else path
+-
+     def play_file(self, file_path: str, semitones: int = 0) -> PlaybackResult:
+         """Start playback of a media file.
+ 
+@@ -145,14 +137,15 @@ class StreamManager:
+             logging.error(error_message)
+             return PlaybackResult(success=False, error=error_message)
+ 
+-        # Set stream URL based on format
++        # Set stream URL based on format. App-relative: the browser prefixes it
++        # with whatever prefix this request is served under.
+         if is_hls:
+-            stream_url_path = self._with_base_path(f"/stream/{fr.stream_uid}.m3u8")
++            stream_url_path = f"/stream/{fr.stream_uid}.m3u8"
+         else:
+             if complete_transcode_before_play or not requires_transcoding:
+-                stream_url_path = self._with_base_path(f"/stream/full/{fr.stream_uid}")
++                stream_url_path = f"/stream/full/{fr.stream_uid}"
+             else:
+-                stream_url_path = self._with_base_path(f"/stream/{fr.stream_uid}.mp4")
++                stream_url_path = f"/stream/{fr.stream_uid}.mp4"
+ 
+         if not requires_transcoding:
+             is_transcoding_complete = self._copy_file(file_path, fr.output_file)
+@@ -164,7 +157,7 @@ class StreamManager:
+ 
+         subtitle_url = None
+         if fr.ass_file_path:
+-            subtitle_url = self._with_base_path(f"/subtitle/{fr.stream_uid}")
++            subtitle_url = f"/subtitle/{fr.stream_uid}"
+             logging.debug(f"Subtitle file found: {fr.ass_file_path}. URL: {subtitle_url}")
+ 
+         # Check if the stream is ready to play
+diff --git a/pikaraoke/lib/url_prefix.py b/pikaraoke/lib/url_prefix.py
+index 0a1c56c..1b0e7a4 100644
+--- a/pikaraoke/lib/url_prefix.py
++++ b/pikaraoke/lib/url_prefix.py
+@@ -4,6 +4,13 @@ from collections.abc import Callable
+ from typing import Any
+ from urllib.parse import urlsplit, urlunsplit
+ 
++from flask import has_request_context, request
++
++# Home Assistant Core sets this header on every Ingress request. Its value is the
++# public path the browser sees, e.g. "/api/hassio_ingress/<token>", which the
++# Supervisor strips before the request reaches the add-on container.
++INGRESS_PATH_HEADER = "HTTP_X_INGRESS_PATH"
++
+ 
+ def normalize_url_base_path(path: str | None) -> str:
+     """Normalize a configured URL base path for consistent routing."""
+@@ -42,25 +49,65 @@ def append_base_path_to_url(url: str, base_path: str) -> str:
+     )
+ 
+ 
++def get_ingress_path(environ: dict[str, Any]) -> str:
++    """Read the Ingress mount path Core advertised for this request.
++
++    Returns an empty string when the request did not come through Ingress, which
++    is the case for direct access to the add-on's port.
++    """
++    return normalize_url_base_path(environ.get(INGRESS_PATH_HEADER))
++
++
++def get_request_base_path() -> str:
++    """The URL prefix the current request is served under.
++
++    Empty when the app is served from the root. Under Home Assistant Ingress
++    this is the per-request mount path, which carries a session token, so it
++    cannot be known before the request arrives.
++    """
++    if has_request_context():
++        return request.script_root
++    return ""
++
++
+ class BasePathMiddleware:
+-    """Expose the app under a configured URL prefix without duplicating routes."""
++    """Expose the app under a URL prefix without duplicating routes.
++
++    Two kinds of prefix are handled, and they can be combined:
++
++    - A configured base path (``--base-path``), which PiKaraoke strips from
++      ``PATH_INFO`` itself when a reverse proxy forwards the prefix unstripped.
++    - The Home Assistant Ingress path, taken from the ``X-Ingress-Path``
++      header. The Supervisor has already stripped that prefix from the path by
++      the time the request arrives, so it is only recorded as ``SCRIPT_NAME``:
++      Werkzeug then keeps ``request.path`` relative (so routes and auth checks
++      are unaffected) while ``url_for`` and ``request.script_root`` carry the
++      prefix, which is what the browser needs.
++    """
+ 
+     def __init__(self, app: Callable[..., Any], base_path: str):
+         self.app = app
+         self.base_path = normalize_url_base_path(base_path)
+ 
+     def __call__(self, environ: dict[str, Any], start_response: Callable[..., Any]) -> Any:
+-        if not self.base_path:
+-            return self.app(environ, start_response)
+-
+-        path_info = environ.get("PATH_INFO", "") or ""
+         script_name = environ.get("SCRIPT_NAME", "") or ""
++        ingress_path = get_ingress_path(environ)
++
++        if ingress_path:
++            # Core's path is the one the browser sees, so it wins over any
++            # SCRIPT_NAME a proxy set: the two name the same mount point.
++            script_name = ingress_path
++
++        if self.base_path:
++            path_info = environ.get("PATH_INFO", "") or ""
++            if path_info == self.base_path:
++                path_info = "/"
++            elif path_info.startswith(f"{self.base_path}/"):
++                path_info = path_info[len(self.base_path) :]
++            environ["PATH_INFO"] = path_info or "/"
++            script_name = f"{script_name}{self.base_path}"
+ 
+-        if path_info == self.base_path:
+-            path_info = "/"
+-        elif path_info.startswith(f"{self.base_path}/"):
+-            path_info = path_info[len(self.base_path) :]
++        if script_name:
++            environ["SCRIPT_NAME"] = script_name
+ 
+-        environ["PATH_INFO"] = path_info or "/"
+-        environ["SCRIPT_NAME"] = f"{script_name}{self.base_path}"
+         return self.app(environ, start_response)
+diff --git a/pikaraoke/routes/settings.py b/pikaraoke/routes/settings.py
+index d85a791..434296d 100644
+--- a/pikaraoke/routes/settings.py
++++ b/pikaraoke/routes/settings.py
+@@ -70,6 +70,7 @@ def settings():
+         per_page_options=per_page_options(k.browse_results_per_page),
+         enable_title_tidy=k.enable_title_tidy,
+         enable_folder_browsing=k.enable_folder_browsing,
++        fetch_lyrics=k.fetch_lyrics,
+         score_phrases={
+             "low": k.low_score_phrases,
+             "mid": k.mid_score_phrases,
+diff --git a/pikaraoke/static/js/splash.js b/pikaraoke/static/js/splash.js
+index 9924827..aea17aa 100644
+--- a/pikaraoke/static/js/splash.js
++++ b/pikaraoke/static/js/splash.js
+@@ -400,11 +400,16 @@ const handleNowPlayingUpdate = (np) => {
+ 
+   const video = getVideoPlayer();
+ 
+-  updateSubtitles(np.now_playing_subtitle_url, video);
++  updateSubtitles(
++    np.now_playing_subtitle_url ? withBasePath(np.now_playing_subtitle_url) : np.now_playing_subtitle_url,
++    video
++  );
+ 
+   if (np.now_playing_url && np.now_playing_url !== currentVideoUrl) {
+     currentVideoUrl = np.now_playing_url;
+-    const streamUrl = np.now_playing_url;
++    // App-relative from the server, so the prefix this page is served under
++    // (a reverse proxy path, or the Home Assistant Ingress path) is applied here.
++    const streamUrl = withBasePath(np.now_playing_url);
+     $("#video-source").attr("src", "");
+     video.load();
+     $("#video-source").attr("src", streamUrl);
+diff --git a/pikaraoke/templates/settings.html b/pikaraoke/templates/settings.html
+index 33a7801..ce4beef 100644
+--- a/pikaraoke/templates/settings.html
++++ b/pikaraoke/templates/settings.html
+@@ -613,6 +613,13 @@
+ 					</span>
+ 					<input id="pref-enable-folder-browsing" type="checkbox" class="user-preference-checkbox switch ml-4 mr-0" data-pref="enable_folder_browsing" {% if enable_folder_browsing == True %}checked{% endif %}>
+ 				</label>
++				<label class="panel-block px-5 py-3 is-justify-content-space-between">
++					<span>
++						{# MSG: Checkbox label which enables fetching a downloaded song's lyrics #} {% trans %}Fetch song lyrics{% endtrans %}
++						<span class="is-block is-size-7 has-text-grey-light">{% trans %}Shows the words on the screen while the song plays, when the video has captions.{% endtrans %}</span>
++					</span>
++					<input id="pref-fetch-lyrics" type="checkbox" class="user-preference-checkbox switch ml-4 mr-0" data-pref="fetch_lyrics" {% if fetch_lyrics == True %}checked{% endif %}>
++				</label>
+ 				<div class="panel-block px-5 py-3 is-justify-content-space-between">
+ 					<label for="pref-browse-per-page">{# MSG: Label for the dropdown choosing how many songs are shown per page on the Songs page. #} {% trans %}Songs per page{% endtrans %}</label>
+ 					<div class="select is-flex-shrink-0 ml-4">
+diff --git a/tests/unit/test_args.py b/tests/unit/test_args.py
+index b2d63b8..6c151b7 100644
+--- a/tests/unit/test_args.py
++++ b/tests/unit/test_args.py
+@@ -111,6 +111,22 @@ class TestParsePikaraokeArgs:
+         args = parse_pikaraoke_args()
+         assert args.admin_password == "hunter2"
+ 
++    def test_autoplay_flags_default_to_off(self, monkeypatch):
++        monkeypatch.setattr("sys.argv", ["pikaraoke"])
++        args = parse_pikaraoke_args()
++        assert args.disable_autoplay is False
++        assert args.enable_autoplay is False
++
++    def test_disable_autoplay_flag(self, monkeypatch):
++        monkeypatch.setattr("sys.argv", ["pikaraoke", "--disable-autoplay"])
++        args = parse_pikaraoke_args()
++        assert args.disable_autoplay is True
++
++    def test_enable_autoplay_flag(self, monkeypatch):
++        monkeypatch.setattr("sys.argv", ["pikaraoke", "--enable-autoplay"])
++        args = parse_pikaraoke_args()
++        assert args.enable_autoplay is True
++
+     def test_a_background_video_path_that_does_not_exist_is_dropped(self, monkeypatch, tmp_path):
+         """The message always claimed this; nothing used to reassign the path."""
+         monkeypatch.setattr("sys.argv", ["pikaraoke", "--bg-video-path", str(tmp_path / "nope")])
+diff --git a/tests/unit/test_download_manager.py b/tests/unit/test_download_manager.py
+index 7f6de94..b5694ff 100644
+--- a/tests/unit/test_download_manager.py
++++ b/tests/unit/test_download_manager.py
+@@ -40,6 +40,18 @@ def no_reprioritize():
+         yield
+ 
+ 
++@pytest.fixture(autouse=True)
++def no_lyrics():
++    """Keep the lyrics fetch out of the download tests.
++
++    Fetching lyrics shells out to yt-dlp, which these tests must not do: they
++    mock the download subprocess, which would break the metadata query instead
++    of running it.
++    """
++    with patch("pikaraoke.lib.download_manager.fetch_lyrics") as mock:
++        yield mock
++
++
+ @pytest.fixture
+ def events():
+     """Create a real EventSystem instance for testing."""
+@@ -47,9 +59,14 @@ def events():
+ 
+ 
+ @pytest.fixture
+-def preferences():
+-    """Create a real PreferenceManager instance for testing."""
+-    return PreferenceManager()
++def preferences(tmp_path):
++    """Create a real PreferenceManager instance for testing.
++
++    The config file lives in tmp_path: a real PreferenceManager writes to the
++    user's own config.ini, so a test that changes a setting would otherwise
++    change the developer's.
++    """
++    return PreferenceManager(config_file_path=str(tmp_path / "config.ini"))
+ 
+ 
+ @pytest.fixture
+@@ -175,9 +192,71 @@ class TestDownloadManagerQueueDownload:
+         assert item["video_url"] == "https://youtube.com/watch?v=test123"
+ 
+ 
++class TestFetchLyricsOnDownload:
++    """Tests for fetching a downloaded song's lyrics."""
++
++    @patch("flask_babel._", side_effect=lambda x: x)
++    @patch("subprocess.Popen")
++    @patch("pikaraoke.lib.download_manager.build_ytdl_download_command")
++    @patch("pikaraoke.lib.download_manager.fetch_lyrics")
++    def test_the_song_gets_its_lyrics(
++        self, mock_fetch, mock_build_cmd, mock_popen, mock_gettext, download_manager, song_manager
++    ):
++        mock_build_cmd.return_value = ["yt-dlp", "url"]
++        process = MagicMock()
++        process.stdout.readline.side_effect = ["Done", ""]
++        process.poll.return_value = 0
++        mock_popen.return_value = process
++        song_manager.songs.find_by_id.return_value = "/songs/Song---dQw4w9WgXcQ.mp4"
++
++        download_manager._execute_download(make_request())
++
++        mock_fetch.assert_called_once_with(
++            "https://youtube.com/watch?v=dQw4w9WgXcQ", "/songs/Song---dQw4w9WgXcQ.mp4"
++        )
++
++    @patch("flask_babel._", side_effect=lambda x: x)
++    @patch("subprocess.Popen")
++    @patch("pikaraoke.lib.download_manager.build_ytdl_download_command")
++    @patch("pikaraoke.lib.download_manager.fetch_lyrics")
++    def test_lyrics_are_skipped_when_the_setting_is_off(
++        self, mock_fetch, mock_build_cmd, mock_popen, mock_gettext, download_manager, song_manager
++    ):
++        mock_build_cmd.return_value = ["yt-dlp", "url"]
++        process = MagicMock()
++        process.stdout.readline.side_effect = ["Done", ""]
++        process.poll.return_value = 0
++        mock_popen.return_value = process
++        song_manager.songs.find_by_id.return_value = "/songs/Song---dQw4w9WgXcQ.mp4"
++        download_manager._preferences.set("fetch_lyrics", False)
++
++        download_manager._execute_download(make_request())
++
++        mock_fetch.assert_not_called()
++
++    @patch("flask_babel._", side_effect=lambda x: x)
++    @patch("subprocess.Popen")
++    @patch("pikaraoke.lib.download_manager.build_ytdl_download_command")
++    @patch("pikaraoke.lib.download_manager.fetch_lyrics")
++    def test_a_song_without_lyrics_is_still_downloaded(
++        self, mock_fetch, mock_build_cmd, mock_popen, mock_gettext, download_manager, song_manager
++    ):
++        """A video with no captions leaves the song without one, which is not a failure."""
++        mock_fetch.side_effect = OSError("no captions")
++        mock_build_cmd.return_value = ["yt-dlp", "url"]
++        process = MagicMock()
++        process.stdout.readline.side_effect = ["Done", ""]
++        process.poll.return_value = 0
++        mock_popen.return_value = process
++        song_manager.songs.find_by_id.return_value = "/songs/Song---dQw4w9WgXcQ.mp4"
++
++        rc = download_manager._execute_download(make_request())
++
++        assert rc == 0
++
++
+ class TestDownloadManagerExecuteDownload:
+     """Tests for DownloadManager._execute_download method."""
+-
+     @patch("flask_babel._", side_effect=lambda x: x)
+     @patch("subprocess.Popen")
+     @patch("pikaraoke.lib.download_manager.build_ytdl_download_command")
+diff --git a/tests/unit/test_lyrics.py b/tests/unit/test_lyrics.py
+new file mode 100644
+index 0000000..490d9ba
+--- /dev/null
++++ b/tests/unit/test_lyrics.py
+@@ -0,0 +1,208 @@
++"""Unit tests for the lyrics module."""
++
++import json
++import os
++import subprocess
++import sys
++from unittest.mock import patch
++
++import pytest
++
++from pikaraoke.lib.lyrics import (
++    MAX_TRACK_ATTEMPTS,
++    candidate_tracks,
++    fetch_lyrics,
++)
++
++URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
++
++
++@pytest.fixture(autouse=True)
++def _module_ytdlp_command():
++    """Pin yt-dlp invocation to the module so command assertions stay hermetic."""
++    with patch(
++        "pikaraoke.lib.lyrics.ytdlp_command",
++        return_value=[sys.executable, "-m", "yt_dlp"],
++    ):
++        yield
++
++
++def _info(language="en", manual=None, automatic=None) -> dict:
++    """Build the metadata shape yt-dlp reports for a video."""
++    return {
++        "language": language,
++        "subtitles": manual or {},
++        "automatic_captions": automatic or {},
++    }
++
++
++class TestCandidateTracks:
++    """Tests for choosing which caption track to fetch."""
++
++    def test_manual_captions_come_first(self):
++        tracks = candidate_tracks(_info(manual={"en": []}, automatic={"en-orig": []}))
++
++        assert tracks[0] == ("en", False)
++
++    def test_the_original_language_beats_english(self):
++        tracks = candidate_tracks(_info(language="ja", manual={"en": [], "ja": []}))
++
++        assert tracks[0] == ("ja", False)
++
++    def test_a_caption_set_id_does_not_hide_the_language(self):
++        """YouTube suffixes an uploader's track with the id of its caption set."""
++        tracks = candidate_tracks(_info(language="ko", manual={"ko-nP7-2PuUl7o": []}))
++
++        assert tracks[0] == ("ko-nP7-2PuUl7o", False)
++
++    def test_the_original_captions_beat_english_ones(self):
++        tracks = candidate_tracks(_info(language="ja", manual={"en": []}, automatic={"ja-orig": []}))
++
++        assert tracks[0] == ("ja-orig", True)
++
++    def test_machine_translations_are_not_offered(self):
++        """YouTube offers translations of the original track in a hundred-odd languages.
++
++        A translated lyric sheet is worse than none, so only the original
++        language's automatic track is considered.
++        """
++        tracks = candidate_tracks(
++            _info(language="ko", automatic={"ko-orig": [], "en": [], "de": [], "fr": []})
++        )
++
++        assert ("en", True) not in tracks
++        assert ("de", True) not in tracks
++        assert ("fr", True) not in tracks
++
++    def test_english_is_used_when_there_is_no_original_language(self):
++        tracks = candidate_tracks(_info(language=None, manual={"en-nP7-2PuUl7o": []}))
++
++        assert tracks[0] == ("en-nP7-2PuUl7o", False)
++
++    def test_the_original_track_is_found_without_a_language(self):
++        """A video that reports no language still names its original track."""
++        tracks = candidate_tracks(_info(language=None, automatic={"ko-orig": [], "en": []}))
++
++        assert tracks[0] == ("ko-orig", True)
++
++    def test_a_video_without_captions_offers_nothing(self):
++        assert candidate_tracks(_info()) == []
++
++    def test_the_same_track_is_not_offered_twice(self):
++        tracks = candidate_tracks(
++            _info(language="en", manual={"en": []}, automatic={"en-orig": [], "en": []})
++        )
++
++        assert len(tracks) == len(set(tracks))
++
++
++class TestFetchLyrics:
++    """Tests for saving captions next to the song."""
++
++    @staticmethod
++    def _metadata(stdout: str):
++        """A completed yt-dlp metadata query."""
++
++        def run(cmd, **kwargs):
++            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
++
++        return run
++
++    def test_saves_the_caption_next_to_the_song(self, tmp_path):
++        song = tmp_path / "Song---dQw4w9WgXcQ.mp4"
++        song.write_bytes(b"video")
++
++        def run(cmd, **kwargs):
++            if "-J" in cmd:
++                return subprocess.CompletedProcess(
++                    cmd, 0, stdout=json.dumps(_info(manual={"en": []})), stderr=""
++                )
++            workdir = os.path.dirname(cmd[cmd.index("-o") + 1])
++            with open(os.path.join(workdir, "dQw4w9WgXcQ.en.ass"), "w", encoding="utf-8") as f:
++                f.write("[Events]\n")
++            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
++
++        with patch("pikaraoke.lib.lyrics.subprocess.run", side_effect=run):
++            result = fetch_lyrics(URL, str(song))
++
++        assert result == str(tmp_path / "Song---dQw4w9WgXcQ.ass")
++        assert os.path.exists(result)
++
++    def test_an_existing_lyric_file_is_left_alone(self, tmp_path):
++        song = tmp_path / "Song---dQw4w9WgXcQ.mp4"
++        song.write_bytes(b"video")
++        existing = tmp_path / "Song---dQw4w9WgXcQ.ass"
++        existing.write_text("mine", encoding="utf-8")
++
++        with patch("pikaraoke.lib.lyrics.subprocess.run") as mock_run:
++            result = fetch_lyrics(URL, str(song))
++
++        assert result == str(existing)
++        assert existing.read_text(encoding="utf-8") == "mine"
++        mock_run.assert_not_called()
++
++    def test_a_video_without_captions_yields_nothing(self, tmp_path):
++        song = tmp_path / "Song---dQw4w9WgXcQ.mp4"
++        song.write_bytes(b"video")
++
++        with patch(
++            "pikaraoke.lib.lyrics.subprocess.run",
++            return_value=subprocess.CompletedProcess([], 0, stdout=json.dumps(_info()), stderr=""),
++        ):
++            result = fetch_lyrics(URL, str(song))
++
++        assert result is None
++        assert not os.path.exists(tmp_path / "Song---dQw4w9WgXcQ.ass")
++
++    def test_a_failing_yt_dlp_yields_nothing(self, tmp_path):
++        song = tmp_path / "Song---dQw4w9WgXcQ.mp4"
++        song.write_bytes(b"video")
++
++        def run(cmd, **kwargs):
++            if "-J" in cmd:
++                return subprocess.CompletedProcess(
++                    cmd, 0, stdout=json.dumps(_info(manual={"en": []})), stderr=""
++                )
++            raise subprocess.CalledProcessError(1, cmd)
++
++        with patch("pikaraoke.lib.lyrics.subprocess.run", side_effect=run):
++            result = fetch_lyrics(URL, str(song))
++
++        assert result is None
++
++    def test_unreadable_metadata_yields_nothing(self, tmp_path):
++        song = tmp_path / "Song---dQw4w9WgXcQ.mp4"
++        song.write_bytes(b"video")
++
++        with patch(
++            "pikaraoke.lib.lyrics.subprocess.run",
++            return_value=subprocess.CompletedProcess([], 0, stdout="not json", stderr=""),
++        ):
++            result = fetch_lyrics(URL, str(song))
++
++        assert result is None
++
++    def test_only_a_few_tracks_are_tried(self, tmp_path):
++        """A video whose captions cannot be reached must not stall the queue."""
++        song = tmp_path / "Song---dQw4w9WgXcQ.mp4"
++        song.write_bytes(b"video")
++        calls = []
++
++        def run(cmd, **kwargs):
++            if "-J" in cmd:
++                return subprocess.CompletedProcess(
++                    cmd,
++                    0,
++                    stdout=json.dumps(
++                        _info(language=None, automatic={f"l{i}-orig": [] for i in range(10)})
++                    ),
++                    stderr="",
++                )
++            calls.append(cmd)
++            raise subprocess.CalledProcessError(1, cmd)
++
++        with patch("pikaraoke.lib.lyrics.subprocess.run", side_effect=run):
++            result = fetch_lyrics(URL, str(song))
++
++        assert result is None
++        assert len(calls) == MAX_TRACK_ATTEMPTS
+diff --git a/tests/unit/test_preference_manager.py b/tests/unit/test_preference_manager.py
+index 98c30da..6495a3a 100644
+--- a/tests/unit/test_preference_manager.py
++++ b/tests/unit/test_preference_manager.py
+@@ -278,6 +278,7 @@ def test_preference_manager_defaults_exist():
+         "disable_bg_video",
+         "disable_score",
+         "autoplay",
++        "fetch_lyrics",
+         "limit_user_songs_by",
+         "enable_fair_queue",
+         "cdg_pixel_scaling",
+diff --git a/tests/unit/test_stream_manager.py b/tests/unit/test_stream_manager.py
+index 19de72a..b37a1a2 100644
+--- a/tests/unit/test_stream_manager.py
++++ b/tests/unit/test_stream_manager.py
+@@ -582,6 +582,26 @@ class TestStreamManagerPlayFile:
+         assert result.success is True
+         assert result.subtitle_url == "/subtitle/12345"
+ 
++    @patch("flask_babel._", side_effect=lambda x: x)
++    @patch("pikaraoke.lib.stream_manager.is_transcoding_required", return_value=False)
++    @patch("pikaraoke.lib.stream_manager.FileResolver")
++    def test_stream_urls_are_app_relative(
++        self, mock_resolver_class, mock_transcode_check, mock_gettext, test_prefs
++    ):
++        """The stream URL must not carry a prefix the server cannot know.
++
++        The prefix a request is served under (a reverse proxy path, or the Home
++        Assistant Ingress path) is only known per request, so the URL is handed
++        out app-relative and the client prefixes it.
++        """
++        sm = StreamManager(test_prefs, streaming_format="hls")
++        self._setup_resolver(mock_resolver_class, output_ext="m3u8")
++
++        with patch.object(sm, "_transcode_file", return_value=(True, False)):
++            result = sm.play_file("/songs/test.mp4")
++
++        assert result.stream_url == "/stream/12345.m3u8"
++
+     @patch("flask_babel._", side_effect=lambda x: x)
+     @patch("pikaraoke.lib.stream_manager.is_transcoding_required", return_value=True)
+     @patch("pikaraoke.lib.stream_manager.FileResolver")
+diff --git a/tests/unit/test_url_prefix.py b/tests/unit/test_url_prefix.py
+index be061ba..ca07d09 100644
+--- a/tests/unit/test_url_prefix.py
++++ b/tests/unit/test_url_prefix.py
+@@ -3,6 +3,7 @@ from flask import Flask, jsonify, request, url_for
+ from pikaraoke.lib.url_prefix import (
+     BasePathMiddleware,
+     append_base_path_to_url,
++    get_ingress_path,
+     normalize_url_base_path,
+ )
+ 
+@@ -73,6 +74,65 @@ def test_base_path_middleware_accepts_unstripped_prefixed_requests():
+     assert response.get_json()["hello_url"] == "/karaoke/hello"
+ 
+ 
++def create_ingress_test_app() -> Flask:
++    """An app with no configured base path, as the add-on runs it."""
++    app = Flask(__name__)
++    app.wsgi_app = BasePathMiddleware(app.wsgi_app, "")
++
++    @app.route("/hello")
++    def hello():
++        return jsonify(
++            {
++                "path": request.path,
++                "script_root": request.script_root,
++                "hello_url": url_for("hello"),
++            }
++        )
++
++    return app
++
++
++def test_ingress_path_is_read_from_the_header():
++    assert get_ingress_path({"HTTP_X_INGRESS_PATH": "/api/hassio_ingress/tok"}) == (
++        "/api/hassio_ingress/tok"
++    )
++    assert get_ingress_path({}) == ""
++    assert get_ingress_path({"HTTP_X_INGRESS_PATH": ""}) == ""
++
++
++def test_ingress_prefix_keeps_paths_relative_and_urls_prefixed():
++    """The Supervisor strips the Ingress prefix before the request arrives.
++
++    So the path must stay relative for routing and auth checks, while the
++    generated URLs carry the prefix the browser actually uses.
++    """
++    app = create_ingress_test_app()
++    client = app.test_client()
++
++    response = client.get(
++        "/hello",
++        headers={"X-Ingress-Path": "/api/hassio_ingress/tok123"},
++    )
++
++    assert response.status_code == 200
++    assert response.get_json() == {
++        "path": "/hello",
++        "script_root": "/api/hassio_ingress/tok123",
++        "hello_url": "/api/hassio_ingress/tok123/hello",
++    }
++
++
++def test_ingress_prefix_is_ignored_without_the_header():
++    app = create_ingress_test_app()
++    client = app.test_client()
++
++    response = client.get("/hello")
++
++    assert response.status_code == 200
++    assert response.get_json()["script_root"] == ""
++    assert response.get_json()["hello_url"] == "/hello"
++
++
+ def test_static_file_urls_work_with_base_path():
+     """Test that static file URLs are generated correctly with base path."""
+     app = create_prefixed_test_app()
