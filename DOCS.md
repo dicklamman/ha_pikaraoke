@@ -42,7 +42,7 @@ build fails with a clear conflict rather than producing a broken add-on.
 | `autoplay` | Start the next queued song automatically. Disable to let the host press play. |
 | `streaming_format` | `hls` (default) or `mp4`. |
 | `fetch_lyrics` | Fetch a downloaded song's captions from YouTube and save them next to it, so the lyrics appear on screen during playback. On by default. |
-| `url` | Override the address shown on the splash screen and in the QR code, for example `http://192.168.1.50:5555`. |
+| `url` | Override the address shown on the splash screen and in the QR code, for example `http://192.168.1.50:5555`. Only needed when the address the add-on works out is not the one to use. |
 
 ## Mappings
 
@@ -58,8 +58,13 @@ reachable from the sidebar and from any device that can reach Home Assistant.
 
 The port `5555` is also published, which lets you open the interface directly at
 `http://<home-assistant-host>:5555` and use the splash screen on a second
-display. Set the `url` option so the QR code on the splash screen points at
-that address rather than the container's internal one.
+display.
+
+The QR code on the splash screen points at that address. The add-on asks the
+Home Assistant Supervisor for the host's address on the local network, because
+the address the container detects for itself belongs to Home Assistant's
+internal network and cannot be reached from a phone. Set the `url` option to
+override it.
 
 ## Lyrics
 

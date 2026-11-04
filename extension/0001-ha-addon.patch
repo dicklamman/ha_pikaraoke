@@ -85,10 +85,18 @@ index 896469e..0de5d1f 100644
      # expose karaoke object to the flask app
      with app.app_context():
 diff --git a/pikaraoke/karaoke.py b/pikaraoke/karaoke.py
-index 7feb447..d643842 100644
+index 7feb447..07a89ed 100644
 --- a/pikaraoke/karaoke.py
 +++ b/pikaraoke/karaoke.py
-@@ -264,7 +264,6 @@ class Karaoke:
+@@ -27,6 +27,7 @@ from pikaraoke.lib.get_platform import (
+     get_platform,
+     is_raspberry_pi,
+ )
++from pikaraoke.lib.ha_network import get_supervisor_lan_ip
+ from pikaraoke.lib.karaoke_database import KaraokeDatabase
+ from pikaraoke.lib.keep_awake import KeepAwake
+ from pikaraoke.lib.library_scanner import LibraryScanner, ScanResult
+@@ -264,7 +265,6 @@ class Karaoke:
              events=self.events,
              filename_from_path=self.song_manager.display_name_from_path,
              streaming_format=self.streaming_format,
@@ -96,6 +104,22 @@ index 7feb447..d643842 100644
          )
  
          # Event bridging: the coordinator wires manager events to the UI (SocketIO/notifications).
+@@ -454,6 +454,15 @@ class Karaoke:
+         else:
+             self.ip = get_ip(self.platform)
+ 
++        # In a Home Assistant add-on the detected address is the container's own
++        # address on the Supervisor's internal Docker network, which only means
++        # something inside Home Assistant. The host's real address is the one
++        # devices on the network can reach, so the QR code has to use that.
++        host_ip = get_supervisor_lan_ip()
++        if host_ip:
++            logging.debug("Using the Home Assistant host address: " + host_ip)
++            self.ip = host_ip
++
+         logging.debug("IP address (for QR code and splash screen): " + self.ip)
+ 
+         if self.url_override != None:
 diff --git a/pikaraoke/lib/args.py b/pikaraoke/lib/args.py
 index bd43d22..1f49ff9 100644
 --- a/pikaraoke/lib/args.py
@@ -176,6 +200,157 @@ index 3603c13..32c78bf 100644
                  self._events.emit("song_downloaded", song_path, video_id)
              else:
                  logging.warning(
+diff --git a/pikaraoke/lib/ha_network.py b/pikaraoke/lib/ha_network.py
+new file mode 100644
+index 0000000..6980ef5
+--- /dev/null
++++ b/pikaraoke/lib/ha_network.py
+@@ -0,0 +1,145 @@
++"""Resolve the Home Assistant host's LAN address from inside an add-on.
++
++An add-on runs in a container on the Supervisor's internal Docker network, so
++the address PiKaraoke detects for itself is something like 172.30.33.12. That
++address only means anything inside Home Assistant: a phone on the same network
++as the host cannot reach it, so the QR code on the splash screen leads nowhere.
++
++The Supervisor knows the address the host actually has on the network, so ask
++it for that instead. Outside Home Assistant there is no Supervisor to ask, and
++the caller keeps whatever it detected itself.
++"""
++
++import logging
++import os
++
++import requests
++
++# The Supervisor is reachable from an add-on container under this name.
++SUPERVISOR_URL = "http://supervisor"
++
++# The endpoint that lists the host's network interfaces.
++NETWORK_INFO_PATH = "/network/info"
++
++# The Supervisor is local, so this only has to cover a slow answer.
++REQUEST_TIMEOUT_SECONDS = 5
++
++# An address in one of these ranges is not reachable from the network the
++# host is on: the first is the container's own loopback, the second is the
++# link-local range that has no route off the machine.
++_UNUSABLE_PREFIXES = ("127.", "169.254.")
++
++
++def _first_usable_address(addresses: object) -> str | None:
++    """Return the first IPv4 address in a Supervisor address list.
++
++    The Supervisor reports addresses with their prefix length ("192.168.1.10/24"),
++    which has to be stripped to get the bare address.
++
++    Args:
++        addresses: The address list from the Supervisor, or a single address.
++
++    Returns:
++        The bare IPv4 address, or None if the list holds no usable one.
++    """
++    if isinstance(addresses, str):
++        addresses = [addresses]
++    if not isinstance(addresses, (list, tuple)):
++        return None
++
++    for address in addresses:
++        if not isinstance(address, str):
++            continue
++        bare = address.split("/")[0].strip()
++        if not bare or bare.startswith(_UNUSABLE_PREFIXES):
++            continue
++        return bare
++    return None
++
++
++def _ipv4_block(interface: dict) -> dict:
++    """Return the IPv4 block of a Supervisor interface.
++
++    The Supervisor's v1 API reports the block directly on the interface, while
++    v2 nests it under the interface's state.
++
++    Args:
++        interface: One entry of the Supervisor's interface list.
++
++    Returns:
++        The IPv4 block, or an empty dict when the interface has none.
++    """
++    block = interface.get("ipv4")
++    if isinstance(block, dict):
++        return block
++    state = interface.get("state")
++    if isinstance(state, dict):
++        block = state.get("ipv4")
++        if isinstance(block, dict):
++            return block
++    return {}
++
++
++def select_lan_ip(payload: dict) -> str | None:
++    """Pick the host's LAN address out of a Supervisor network info response.
++
++    The primary interface is the one the host routes its traffic through, so it
++    is the address clients on the network use.
++
++    Args:
++        payload: The decoded body of a Supervisor network info response.
++
++    Returns:
++        The LAN address, or None when the payload holds no usable one.
++    """
++    interfaces = payload.get("interfaces")
++    if not isinstance(interfaces, list):
++        return None
++
++    fallback: str | None = None
++    for interface in interfaces:
++        if not isinstance(interface, dict):
++            continue
++        block = _ipv4_block(interface)
++        address = _first_usable_address(block.get("addresses") or block.get("address"))
++        if not address:
++            continue
++        if interface.get("primary"):
++            return address
++        if fallback is None:
++            fallback = address
++
++    return fallback
++
++
++def get_supervisor_lan_ip() -> str | None:
++    """Return the LAN address of the Home Assistant host, if there is one.
++
++    Returns:
++        The host's LAN address, or None when this is not running as a Home
++        Assistant add-on, or the Supervisor does not report a usable address.
++    """
++    token = os.environ.get("SUPERVISOR_TOKEN")
++    if not token:
++        return None
++
++    try:
++        response = requests.get(
++            SUPERVISOR_URL + NETWORK_INFO_PATH,
++            headers={"Authorization": f"Bearer {token}"},
++            timeout=REQUEST_TIMEOUT_SECONDS,
++        )
++        response.raise_for_status()
++        payload = response.json()
++    except requests.RequestException as e:
++        logging.warning(f"Could not read the host network info from the Supervisor: {e}")
++        return None
++    except ValueError as e:
++        logging.warning(f"The Supervisor returned network info that is not JSON: {e}")
++        return None
++
++    if not isinstance(payload, dict):
++        logging.warning("The Supervisor returned network info in an unexpected shape.")
++        return None
++
++    return select_lan_ip(payload)
 diff --git a/pikaraoke/lib/lyrics.py b/pikaraoke/lib/lyrics.py
 new file mode 100644
 index 0000000..5198673
@@ -759,6 +934,202 @@ index 7f6de94..b5694ff 100644
      @patch("flask_babel._", side_effect=lambda x: x)
      @patch("subprocess.Popen")
      @patch("pikaraoke.lib.download_manager.build_ytdl_download_command")
+diff --git a/tests/unit/test_ha_network.py b/tests/unit/test_ha_network.py
+new file mode 100644
+index 0000000..e48caff
+--- /dev/null
++++ b/tests/unit/test_ha_network.py
+@@ -0,0 +1,190 @@
++"""Unit tests for the Home Assistant host network module."""
++
++from unittest.mock import MagicMock, patch
++
++import requests
++
++from pikaraoke.lib.ha_network import (
++    get_supervisor_lan_ip,
++    select_lan_ip,
++)
++
++
++def _v1_payload(address="192.168.0.10/24", primary=True):
++    """A Supervisor v1 network info payload."""
++    return {
++        "interfaces": [
++            {
++                "interface": "eth0",
++                "type": "ethernet",
++                "primary": primary,
++                "ipv4": {"address": [address]},
++            }
++        ],
++        "docker": {"interface": "hassio", "address": "172.30.32.0/23"},
++    }
++
++
++def _v2_payload(address="192.168.0.10/24", primary=True):
++    """A Supervisor v2 network info payload."""
++    return {
++        "interfaces": [
++            {
++                "name": "eth0",
++                "type": "ethernet",
++                "primary": primary,
++                "state": {"ipv4": {"addresses": [address]}},
++            }
++        ],
++        "docker": {"interface": "hassio", "address": "172.30.32.0/23"},
++    }
++
++
++class TestSelectLanIp:
++    """Tests for picking the host address out of a Supervisor response."""
++
++    def test_prefers_the_primary_interface(self):
++        """The primary interface is the one the host routes traffic through."""
++        payload = {
++            "interfaces": [
++                {"interface": "wlan0", "primary": False, "ipv4": {"address": ["10.0.0.5/24"]}},
++                {"interface": "eth0", "primary": True, "ipv4": {"address": ["192.168.0.10/24"]}},
++            ]
++        }
++        assert select_lan_ip(payload) == "192.168.0.10"
++
++    def test_falls_back_to_any_interface(self):
++        """Without a primary interface, any usable address will do."""
++        payload = {
++            "interfaces": [
++                {"interface": "wlan0", "primary": False, "ipv4": {"address": ["10.0.0.5/24"]}}
++            ]
++        }
++        assert select_lan_ip(payload) == "10.0.0.5"
++
++    def test_reads_the_v2_payload_shape(self):
++        """The v2 API nests the addresses under the interface state."""
++        assert select_lan_ip(_v2_payload()) == "192.168.0.10"
++
++    def test_reads_the_v1_payload_shape(self):
++        """The v1 API puts the addresses directly on the interface."""
++        assert select_lan_ip(_v1_payload()) == "192.168.0.10"
++
++    def test_strips_the_prefix_length(self):
++        """The Supervisor reports addresses with their prefix length."""
++        assert select_lan_ip(_v1_payload(address="192.168.0.10/24")) == "192.168.0.10"
++
++    def test_ignores_loopback_and_link_local_addresses(self):
++        """Neither loopback nor link-local addresses can be reached."""
++        payload = {
++            "interfaces": [
++                {"interface": "lo", "primary": True, "ipv4": {"address": ["127.0.0.1/8"]}},
++                {
++                    "interface": "eth0",
++                    "primary": False,
++                    "ipv4": {"address": ["169.254.1.1/16"]},
++                },
++            ]
++        }
++        assert select_lan_ip(payload) is None
++
++    def test_returns_none_without_interfaces(self):
++        """A response without interfaces holds no address."""
++        assert select_lan_ip({"docker": {}}) is None
++
++    def test_returns_none_for_a_broken_payload(self):
++        """A payload that is not shaped like a response holds no address."""
++        assert select_lan_ip({"interfaces": "not a list"}) is None
++
++
++class TestGetSupervisorLanIp:
++    """Tests for asking the Supervisor for the host address."""
++
++    def test_returns_the_host_address(self):
++        """The host address is taken from the Supervisor's response."""
++        response = MagicMock()
++        response.json.return_value = _v1_payload()
++
++        with patch.dict("os.environ", {"SUPERVISOR_TOKEN": "secret"}):
++            with patch("requests.get", return_value=response) as mock_get:
++                assert get_supervisor_lan_ip() == "192.168.0.10"
++
++        _, kwargs = mock_get.call_args
++        assert kwargs["headers"]["Authorization"] == "Bearer secret"
++
++    def test_returns_none_outside_home_assistant(self):
++        """Without a Supervisor token there is nothing to ask."""
++        with patch.dict("os.environ", {}, clear=True):
++            assert get_supervisor_lan_ip() is None
++
++    def test_returns_none_when_the_supervisor_is_unreachable(self):
++        """A Supervisor that cannot be reached leaves the caller to decide."""
++        with patch.dict("os.environ", {"SUPERVISOR_TOKEN": "secret"}):
++            with patch("requests.get", side_effect=requests.ConnectionError("no route")):
++                assert get_supervisor_lan_ip() is None
++
++    def test_returns_none_on_an_error_response(self):
++        """An error response holds no address."""
++        response = MagicMock()
++        response.raise_for_status.side_effect = requests.HTTPError("403")
++
++        with patch.dict("os.environ", {"SUPERVISOR_TOKEN": "secret"}):
++            with patch("requests.get", return_value=response):
++                assert get_supervisor_lan_ip() is None
++
++    def test_returns_none_on_unreadable_json(self):
++        """A response that is not JSON holds no address."""
++        response = MagicMock()
++        response.json.side_effect = ValueError("not json")
++
++        with patch.dict("os.environ", {"SUPERVISOR_TOKEN": "secret"}):
++            with patch("requests.get", return_value=response):
++                assert get_supervisor_lan_ip() is None
++
++
++class TestKaraokeUrl:
++    """Tests for the address PiKaraoke puts in the URL it shows."""
++
++    def _karaoke_stub(self):
++        """A stand-in for the parts of Karaoke that get_url() touches."""
++        from types import SimpleNamespace
++
++        return SimpleNamespace(
++            is_raspberry_pi=False,
++            platform="linux",
++            port=5555,
++            url_override=None,
++            prefer_hostname=False,
++            url_base_path="",
++        )
++
++    def test_uses_the_host_address_instead_of_the_container_address(self):
++        """The container address is unreachable from the network."""
++        from pikaraoke.karaoke import Karaoke
++
++        k = self._karaoke_stub()
++
++        with patch("pikaraoke.karaoke.get_ip", return_value="172.30.33.12"):
++            with patch("pikaraoke.karaoke.get_supervisor_lan_ip", return_value="192.168.0.10"):
++                assert Karaoke.get_url(k) == "http://192.168.0.10:5555"
++
++    def test_keeps_the_detected_address_outside_home_assistant(self):
++        """Without a Supervisor there is nothing better than the detected address."""
++        from pikaraoke.karaoke import Karaoke
++
++        k = self._karaoke_stub()
++
++        with patch("pikaraoke.karaoke.get_ip", return_value="192.168.0.20"):
++            with patch("pikaraoke.karaoke.get_supervisor_lan_ip", return_value=None):
++                assert Karaoke.get_url(k) == "http://192.168.0.20:5555"
++
++    def test_an_explicit_url_still_wins(self):
++        """A URL set by hand is what the user asked for."""
++        from pikaraoke.karaoke import Karaoke
++
++        k = self._karaoke_stub()
++        k.url_override = "http://192.168.0.99:5555"
++
++        with patch("pikaraoke.karaoke.get_ip", return_value="172.30.33.12"):
++            with patch("pikaraoke.karaoke.get_supervisor_lan_ip", return_value="192.168.0.10"):
++                assert Karaoke.get_url(k) == "http://192.168.0.99:5555"
 diff --git a/tests/unit/test_lyrics.py b/tests/unit/test_lyrics.py
 new file mode 100644
 index 0000000..490d9ba

@@ -18,6 +18,11 @@ panel_title: PiKaraoke
 panel_admin: false
 ports:
   5555/tcp: 5555
+# The Supervisor knows the host's address on the local network, which is the
+# address the QR code has to point at: the add-on's own address is on the
+# internal Docker network and cannot be reached from a phone.
+hassio_api: true
+hassio_role: default
 map:
   - share:rw
   - app_config:rw
