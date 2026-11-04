@@ -85,10 +85,18 @@ index 896469e..0de5d1f 100644
      # expose karaoke object to the flask app
      with app.app_context():
 diff --git a/pikaraoke/karaoke.py b/pikaraoke/karaoke.py
-index 7feb447..07a89ed 100644
+index 7feb447..a20a24a 100644
 --- a/pikaraoke/karaoke.py
 +++ b/pikaraoke/karaoke.py
-@@ -27,6 +27,7 @@ from pikaraoke.lib.get_platform import (
+@@ -13,6 +13,7 @@ import qrcode
+ from flask_babel import _
+ from qrcode.image.pure import PyPNGImage
+ 
++from pikaraoke.lib.discovery import DiscoveryResponder
+ from pikaraoke.lib.download_manager import DownloadManager
+ from pikaraoke.lib.duration_populator import DurationPopulator
+ from pikaraoke.lib.events import EventSystem
+@@ -27,6 +28,7 @@ from pikaraoke.lib.get_platform import (
      get_platform,
      is_raspberry_pi,
  )
@@ -96,7 +104,28 @@ index 7feb447..07a89ed 100644
  from pikaraoke.lib.karaoke_database import KaraokeDatabase
  from pikaraoke.lib.keep_awake import KeepAwake
  from pikaraoke.lib.library_scanner import LibraryScanner, ScanResult
-@@ -264,7 +265,6 @@ class Karaoke:
+@@ -73,6 +75,7 @@ class Karaoke:
+     volume: float
+ 
+     qr_code_path: str | None = None
++    discovery: DiscoveryResponder
+     base_path: str = os.path.dirname(__file__)
+     loop_interval: int = 500  # in milliseconds
+     default_logo_path: str = os.path.join(base_path, "static", "images", "logo.png")
+@@ -253,6 +256,12 @@ class Karaoke:
+ 
+         self.generate_qr_code()
+ 
++        # Answer discovery requests, so a player that was not told where the
++        # server is can find it by asking. The port is the web port, so the
++        # address is the one the player needs anyway.
++        self.discovery = DiscoveryResponder(port=self.port, url=self.url)
++        self.discovery.start()
++
+         # Set preferred language from command line if provided (persists to config)
+         if preferred_language:
+             self.preferences.set("preferred_language", preferred_language)
+@@ -264,7 +273,6 @@ class Karaoke:
              events=self.events,
              filename_from_path=self.song_manager.display_name_from_path,
              streaming_format=self.streaming_format,
@@ -104,7 +133,7 @@ index 7feb447..07a89ed 100644
          )
  
          # Event bridging: the coordinator wires manager events to the UI (SocketIO/notifications).
-@@ -454,6 +454,15 @@ class Karaoke:
+@@ -454,6 +462,15 @@ class Karaoke:
          else:
              self.ip = get_ip(self.platform)
  
@@ -120,6 +149,14 @@ index 7feb447..07a89ed 100644
          logging.debug("IP address (for QR code and splash screen): " + self.ip)
  
          if self.url_override != None:
+@@ -720,6 +737,7 @@ class Karaoke:
+         """Stop the karaoke run loop."""
+         self.sound_manager.stop()
+         self._keep_awake.stop()
++        self.discovery.stop()
+         self.running = False
+ 
+     def handle_run_loop(self) -> None:
 diff --git a/pikaraoke/lib/args.py b/pikaraoke/lib/args.py
 index bd43d22..1f49ff9 100644
 --- a/pikaraoke/lib/args.py
@@ -156,6 +193,142 @@ index bd43d22..1f49ff9 100644
      queue.add_argument(
          "--enable-fair-queue",
          action="store_true",
+diff --git a/pikaraoke/lib/discovery.py b/pikaraoke/lib/discovery.py
+new file mode 100644
+index 0000000..8bd5a58
+--- /dev/null
++++ b/pikaraoke/lib/discovery.py
+@@ -0,0 +1,130 @@
++"""Answer a "who is the PiKaraoke server?" question over UDP.
++
++A player that is not told where the server is has to find it. The obvious
++answer, a web page with an address in it, needs a keyboard, which a television
++does not have. So the server answers on UDP instead: a player broadcasts a
++short question on the discovery port and the server replies with where it
++lives.
++
++The reply carries the server's own idea of its address, which for a Home
++Assistant add-on is the host's address on the local network rather than the
++container's, because only the former can be reached from a phone.
++"""
++
++import json
++import logging
++import socket
++import threading
++
++# The question a player broadcasts, and the answer a server sends back. The
++# question is padded so that a server can recognise it in a packet that also
++# carries something else.
++DISCOVERY_REQUEST = b"PIKARAOKE_DISCOVER_V1"
++
++# The port a player is expected to try first. It matches the web port, so that
++# a player with nothing else to go on has one number to try.
++DEFAULT_DISCOVERY_PORT = 5555
++
++# How long to wait for a reply, and how many replies to collect before
++# stopping. Several servers may answer, and the first one is usually the one
++# closest to the player, but collecting a few costs nothing and lets the player
++# show a list.
++REPLY_TIMEOUT_SECONDS = 3.0
++
++# The UDP port is opened on the same number as the web port, so a port that is
++# already in use means something else has it.
++SOCKET_TIMEOUT_SECONDS = 1.0
++
++
++class DiscoveryResponder:
++    """Answers discovery broadcasts with the server's address.
++
++    The responder runs on its own thread and holds a socket bound to every
++    interface, so a player on the local network can reach it either by
++    broadcasting or by asking a known address directly.
++    """
++
++    def __init__(self, port: int, url: str, site_name: str = "PiKaraoke") -> None:
++        """Set up the responder.
++
++        Args:
++            port: The UDP port to answer on.
++            url: The address a player should open to reach the web interface.
++            site_name: The name to show for this server.
++        """
++        self.port = port
++        self.url = url
++        self.site_name = site_name
++        self._socket: socket.socket | None = None
++        self._thread: threading.Thread | None = None
++        self._stop = threading.Event()
++
++    def start(self) -> bool:
++        """Begin answering discovery requests.
++
++        Returns:
++            True if the responder is running, False if the port was not free.
++        """
++        if self._thread is not None:
++            return True
++
++        try:
++            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
++            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
++            # Replies are sent back to the address the question came from, which
++            # is often a broadcast address, so sending has to be allowed.
++            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
++            sock.settimeout(SOCKET_TIMEOUT_SECONDS)
++            sock.bind(("0.0.0.0", self.port))
++        except OSError as e:
++            logging.warning(f"Could not open the discovery port {self.port}: {e}")
++            return False
++
++        self._socket = sock
++        self._thread = threading.Thread(target=self._serve, name="discovery", daemon=True)
++        self._thread.start()
++        logging.info(f"Answering discovery requests on UDP port {self.port}")
++        return True
++
++    def stop(self) -> None:
++        """Stop answering discovery requests."""
++        self._stop.set()
++        if self._socket is not None:
++            try:
++                self._socket.close()
++            except OSError:
++                pass
++            self._socket = None
++        self._thread = None
++
++    def _serve(self) -> None:
++        """Answer every question that arrives until the responder is stopped."""
++        while not self._stop.is_set():
++            sock = self._socket
++            if sock is None:
++                return
++            try:
++                data, address = sock.recvfrom(1024)
++            except socket.timeout:
++                continue
++            except OSError:
++                return
++
++            if DISCOVERY_REQUEST not in data:
++                continue
++
++            reply = self._build_reply()
++            try:
++                sock.sendto(reply, address)
++            except OSError as e:
++                logging.debug(f"Could not answer a discovery request from {address}: {e}")
++
++    def _build_reply(self) -> bytes:
++        """Build the answer a player reads."""
++        payload = {
++            "name": self.site_name,
++            "url": self.url,
++            "port": self.port,
++            "app": "pikaraoke",
++        }
++        return json.dumps(payload).encode("utf-8")
 diff --git a/pikaraoke/lib/download_manager.py b/pikaraoke/lib/download_manager.py
 index 3603c13..32c78bf 100644
 --- a/pikaraoke/lib/download_manager.py
@@ -793,6 +966,39 @@ index 33a7801..ce4beef 100644
  				<div class="panel-block px-5 py-3 is-justify-content-space-between">
  					<label for="pref-browse-per-page">{# MSG: Label for the dropdown choosing how many songs are shown per page on the Songs page. #} {% trans %}Songs per page{% endtrans %}</label>
  					<div class="select is-flex-shrink-0 ml-4">
+diff --git a/tests/conftest.py b/tests/conftest.py
+index 194ea24..62b1720 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -266,6 +266,20 @@ class MockKeepAwake:
+         self.active = False
+ 
+ 
++class MockDiscoveryResponder:
++    """Minimal mock of DiscoveryResponder that records whether it is running."""
++
++    def __init__(self):
++        self.active = False
++
++    def start(self):
++        self.active = True
++        return True
++
++    def stop(self):
++        self.active = False
++
++
+ class MockKaraoke:
+     """Minimal mock of the Karaoke class for testing queue operations.
+ 
+@@ -278,6 +292,7 @@ class MockKaraoke:
+         self.sound_manager = MockSoundManager()
+         self.db = KaraokeDatabase(str(tmp_path / "test.db"))
+         self._keep_awake = MockKeepAwake()
++        self.discovery = MockDiscoveryResponder()
+         self._socketio = None
+         self.events = EventSystem()
+         self.preferences = PreferenceManager(
 diff --git a/tests/unit/test_args.py b/tests/unit/test_args.py
 index b2d63b8..6c151b7 100644
 --- a/tests/unit/test_args.py
@@ -820,6 +1026,101 @@ index b2d63b8..6c151b7 100644
      def test_a_background_video_path_that_does_not_exist_is_dropped(self, monkeypatch, tmp_path):
          """The message always claimed this; nothing used to reassign the path."""
          monkeypatch.setattr("sys.argv", ["pikaraoke", "--bg-video-path", str(tmp_path / "nope")])
+diff --git a/tests/unit/test_discovery.py b/tests/unit/test_discovery.py
+new file mode 100644
+index 0000000..df303af
+--- /dev/null
++++ b/tests/unit/test_discovery.py
+@@ -0,0 +1,89 @@
++"""Unit tests for the discovery responder."""
++
++import json
++import socket
++
++from pikaraoke.lib.discovery import (
++    DEFAULT_DISCOVERY_PORT,
++    DISCOVERY_REQUEST,
++    DiscoveryResponder,
++)
++
++
++def _free_udp_port() -> int:
++    """A UDP port nothing is listening on.
++
++    The responder binds to the same port number as the web server, which is
++    allowed because TCP and UDP ports are separate. UDP has no connection to
++    refuse the bind, so the port is found by taking one and letting it go.
++    """
++    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
++    try:
++        probe.bind(("0.0.0.0", 0))
++        return probe.getsockname()[1]
++    finally:
++        probe.close()
++
++
++class TestDiscoveryResponder:
++    """Tests for answering discovery requests."""
++
++    def test_answers_a_discovery_request(self):
++        """A player that asks gets the server's address back."""
++        port = _free_udp_port()
++        responder = DiscoveryResponder(port=port, url="http://192.168.0.10:5555")
++        assert responder.start()
++        try:
++            client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
++            client.settimeout(3.0)
++            try:
++                client.sendto(DISCOVERY_REQUEST, ("127.0.0.1", port))
++                data, _ = client.recvfrom(4096)
++            finally:
++                client.close()
++        finally:
++            responder.stop()
++
++        payload = json.loads(data.decode())
++        assert payload["url"] == "http://192.168.0.10:5555"
++        assert payload["port"] == port
++        assert payload["app"] == "pikaraoke"
++
++    def test_ignores_a_packet_that_is_not_a_request(self):
++        """A packet that is not a question is not answered."""
++        port = _free_udp_port()
++        responder = DiscoveryResponder(port=port, url="http://192.168.0.10:5555")
++        assert responder.start()
++        try:
++            client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
++            client.settimeout(1.0)
++            try:
++                client.sendto(b"something else entirely", ("127.0.0.1", port))
++                with _expect_timeout():
++                    client.recvfrom(4096)
++            finally:
++                client.close()
++        finally:
++            responder.stop()
++
++    def test_stopping_twice_is_harmless(self):
++        """Stopping a responder that is not running does nothing."""
++        responder = DiscoveryResponder(port=0, url="http://192.168.0.10:5555")
++        responder.stop()
++        responder.stop()
++
++    def test_the_discovery_port_matches_the_web_port(self):
++        """A player with one number to try tries the right one."""
++        assert DEFAULT_DISCOVERY_PORT == 5555
++
++
++class _expect_timeout:
++    """Context manager that swallows a socket timeout."""
++
++    def __enter__(self):
++        return self
++
++    def __exit__(self, exc_type, exc, tb):
++        if exc_type is None:
++            raise AssertionError("expected the socket to time out")
++        return issubclass(exc_type, socket.timeout)
 diff --git a/tests/unit/test_download_manager.py b/tests/unit/test_download_manager.py
 index 7f6de94..b5694ff 100644
 --- a/tests/unit/test_download_manager.py

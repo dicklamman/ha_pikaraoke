@@ -18,6 +18,9 @@ panel_title: PiKaraoke
 panel_admin: false
 ports:
   5555/tcp: 5555
+  # The discovery port, so the Android player can find the server by asking
+  # the network instead of having the address typed in.
+  5555/udp: 5555
 # The Supervisor knows the host's address on the local network, which is the
 # address the QR code has to point at: the add-on's own address is on the
 # internal Docker network and cannot be reached from a phone.

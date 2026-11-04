@@ -1,0 +1,13 @@
+# Gradle
+.gradle/
+build/
+app/build/
+local.properties
+
+# The APK is built into the repository, so the one Gradle produces is ignored
+# in favour of the committed copy.
+*.apk
+!apk/*.apk
+
+# Keystores are not ignored: the add-on signs every build with the same key,
+# so an update installs over an existing copy rather than being refused.

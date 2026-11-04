@@ -19,6 +19,7 @@ add-on needs on top of upstream:
 | `extension/0001-ha-addon.patch` | The add-on's own changes to upstream: Home Assistant ingress support and the lyrics feature. |
 | `config.yaml` | The add-on's options and schema. |
 | `run.sh` | The container's entry point. Translates the add-on's options into PiKaraoke's command line. |
+| `android/` | The Android player app, and the built APK. |
 
 Because upstream is fetched during the build, **updating PiKaraoke is a
 one-line change**: set `UPSTREAM_REF` in the `Dockerfile` to a newer branch or
@@ -76,6 +77,53 @@ song plays.
 The captions come from YouTube itself. Human-authored captions are preferred
 over automatic ones, and the song's own language over a translation. A video
 with no reachable captions simply plays without lyrics.
+
+## The Android player
+
+The add-on ships an Android app that shows the splash screen full-screen, for a
+television or a tablet that has no browser worth using as a player.
+
+Download it from the repository: [android/apk/piKaraoke.apk](android/apk/piKaraoke.apk).
+Install it on the device (sideload it, or open the file and allow installation
+from your file manager), then start **PiKaraoke**.
+
+The app looks for the server on the network by itself, so on a television with
+a remote control there is nothing to type: it finds the add-on and shows its
+splash screen. If the network does not allow the search through, the app asks
+for the address instead, in the form `192.168.0.10:5555`.
+
+The address can also be given when the app is started, which is useful for
+putting the app on a home screen with a fixed server:
+
+```sh
+adb shell am start -n com.dicklamman.pikaraoke/.MainActivity \
+    -e com.dicklamman.pikaraoke.SERVER_URL http://192.168.0.10:5555
+```
+
+The app is signed with the keystore in `android/keystore`, so that a newer
+build installs over an older one rather than being refused. Keep the keystore:
+losing it means the app has to be uninstalled before a new one can be
+installed.
+
+### Building the app
+
+```sh
+cd android
+ANDROID_HOME=/path/to/android-sdk ./build-apk.sh
+```
+
+This needs a JDK (17 or newer) and the Android SDK, and writes the result to
+`android/apk/piKaraoke.apk`.
+
+### How the app finds the server
+
+The app asks the local network for a PiKaraoke server over UDP, on the same
+port number as the web interface, and the server answers with the address to
+open. The add-on therefore publishes `5555/udp` as well as `5555/tcp`.
+
+The answer the server gives is the address shown on its splash screen, which is
+the host's address on the local network rather than the container's, so the
+app opens a page that a phone or a television can actually reach.
 
 ## Notes
 

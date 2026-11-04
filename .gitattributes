@@ -5,3 +5,16 @@
 # The extension patch is applied inside the Linux container, where git rejects
 # CRLF line endings in a diff.
 extension/*.patch text eol=lf
+
+# The Android build script is run on the machine that builds the app, which is
+# usually not the container, but it is a shell script either way.
+android/*.sh text eol=lf
+
+# The Gradle wrapper is a binary, and the keystore is too: neither may be
+# touched by line-ending normalization, which would corrupt them.
+android/gradle/wrapper/gradle-wrapper.jar binary
+android/keystore/*.jks binary
+
+# The launcher icons and the APK are binary as well.
+android/**/*.png binary
+android/**/*.apk binary

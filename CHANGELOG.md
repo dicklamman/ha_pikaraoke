@@ -10,3 +10,7 @@
   add-on container's own address on Home Assistant's internal network.
 - Options for the admin password, song folder, download quality, autoplay,
   streaming format and the displayed address.
+- An Android player app, in `android/`, that shows the splash screen
+  full-screen and finds the server on the network by itself. The server
+  answers a discovery request over UDP, so the app needs no address typed
+  in.
