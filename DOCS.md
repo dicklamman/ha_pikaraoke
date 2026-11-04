@@ -89,8 +89,17 @@ from your file manager), then start **PiKaraoke**.
 
 The app looks for the server on the network by itself, so on a television with
 a remote control there is nothing to type: it finds the add-on and shows its
-splash screen. If the network does not allow the search through, the app asks
-for the address instead, in the form `192.168.0.10:5555`.
+splash screen.
+
+The address can also be typed in at any time, which is useful when the search
+does not find the server, or when it finds one at an address that does not
+reach it. The field is on the first screen and is filled in with the address
+last used, so the app connects to it again on the next start. Pressing back
+while the splash is playing brings the field up again.
+
+The address is in the form `192.168.0.10:5555` — the host's address on the
+local network and the port the add-on serves on. The port may be left out if
+it is the usual one.
 
 The address can also be given when the app is started, which is useful for
 putting the app on a home screen with a fixed server:

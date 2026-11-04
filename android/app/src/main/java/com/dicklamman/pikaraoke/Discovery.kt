@@ -1,8 +1,8 @@
 package com.dicklamman.pikaraoke
 
+import android.content.Context
+import android.net.ConnectivityManager
 import android.util.Log
-import java.io.BufferedReader
-import java.io.FileReader
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -18,26 +18,33 @@ import org.json.JSONObject
  * a question goes out, an answer comes back, and the answer says where the web
  * interface lives.
  */
-object Discovery {
+class Discovery(context: Context) {
 
-    private const val TAG = "PiKaraokeDiscovery"
+    private val appContext = context.applicationContext
 
-    /** The question the server recognises. */
-    private const val REQUEST = "PIKARAOKE_DISCOVER_V1"
+    companion object {
+        private const val TAG = "PiKaraokeDiscovery"
 
-    /** The port a player tries first. It matches the web port. */
-    const val DEFAULT_PORT = 5555
+        /** The question the server recognises. */
+        private const val REQUEST = "PIKARAOKE_DISCOVER_V1"
 
-    /** How long to wait for an answer before giving up on a port. */
-    private const val TIMEOUT_MS = 1500
+        /** The port a player tries first. It matches the web port. */
+        const val DEFAULT_PORT = 5555
 
-    /** How many times to ask before giving up on a port. */
-    private const val ATTEMPTS = 2
+        /** How long to wait for an answer before giving up on a port. */
+        private const val TIMEOUT_MS = 1500
+
+        /** How many times to ask before giving up on a port. */
+        private const val ATTEMPTS = 2
+    }
 
     /** One server that answered. */
     data class Server(
         val name: String,
+        /** The address the server says it lives at. */
         val url: String,
+        /** The address the answer came from, which reached the server. */
+        val sourceUrl: String,
         val port: Int
     )
 
@@ -45,8 +52,8 @@ object Discovery {
      * Look for a PiKaraoke server.
      *
      * The broadcast address is asked first, because a server on the same
-     * network answers it, and then the local network's own address as a
-     * fallback for networks where broadcast is switched off.
+     * network answers it, and then the local network's own address and its
+     * gateway as fallbacks for networks where broadcast is switched off.
      *
      * @param port The UDP port to ask on.
      * @return The servers that answered, nearest first. Empty if none did.
@@ -85,7 +92,7 @@ object Discovery {
 
         try {
             val local = InetAddress.getLocalHost()
-            if (local != null && !local.isLoopbackAddress) {
+            if (local != null && !local.isLoopbackAddress && !local.isAnyLocalAddress) {
                 targets.add(local)
             }
         } catch (e: Exception) {
@@ -100,58 +107,40 @@ object Discovery {
     /**
      * The gateways this device routes through.
      *
-     * The gateway is read from the routing table rather than assumed, because
-     * its address differs from one network to the next.
+     * The gateway is read from the network's own connection rather than from
+     * the routing table in procfs, which Android does not let an app read.
      */
     private fun gatewayTargets(): List<InetAddress> {
         val gateways = LinkedHashSet<InetAddress>()
 
         try {
-            val reader = BufferedReader(FileReader("/proc/net/route"))
-            try {
-                // The routing table's columns are interface, destination,
-                // gateway, flags and so on. The gateway is the third column,
-                // and it is in host byte order.
-                reader.forEachLine { line ->
-                    val columns = line.trim().split(Regex("\\s+"))
-                    if (columns.size > 2 && columns[2] != "00000000") {
-                        val address = littleEndianAddress(columns[2])
-                        if (address != null) {
-                            gateways.add(address)
-                        }
-                    }
+            val manager = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val network = manager.activeNetwork ?: return gateways.toList()
+            val properties = manager.getLinkProperties(network) ?: return gateways.toList()
+
+            for (route in properties.routes) {
+                val gateway = route.gateway ?: continue
+                // The unspecified address is not a gateway anyone can be
+                // reached on, and asking it fails outright.
+                if (gateway.isLoopbackAddress || gateway.isAnyLocalAddress) {
+                    continue
                 }
-            } finally {
-                reader.close()
+                gateways.add(gateway)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Could not read the routing table", e)
+            Log.w(TAG, "Could not read the network's gateway", e)
         }
 
         return gateways.toList()
     }
 
     /**
-     * Read a gateway address from the routing table.
-     *
-     * The table writes addresses as a little-endian hex number, so the bytes
-     * have to be read in the opposite order to the way they are written.
-     */
-    private fun littleEndianAddress(hex: String): InetAddress? {
-        return try {
-            val bytes = ByteArray(4)
-            for (i in 0 until 4) {
-                bytes[3 - i] = hex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
-            }
-            InetAddress.getByAddress(bytes)
-        } catch (e: Exception) {
-            Log.w(TAG, "Could not read the gateway address $hex", e)
-            null
-        }
-    }
-
-    /**
      * Ask one address for a server.
+     *
+     * The address the answer came from is kept, because the server's own idea
+     * of its address may be one that cannot be reached from here: a server
+     * behind a router reports its private address, and a container reports the
+     * address on its own network rather than the one its port is published on.
      *
      * @return The server that answered, or null if it did not.
      */
@@ -161,13 +150,22 @@ object Discovery {
             socket.soTimeout = TIMEOUT_MS
 
             val request = REQUEST.toByteArray()
-            socket.send(
-                DatagramPacket(
-                    request,
-                    request.size,
-                    InetSocketAddress(address, port)
+            // Sending can fail outright rather than simply going unanswered:
+            // an address that is not on any network gives an error the socket
+            // raises, and one address failing must not stop the others being
+            // tried.
+            try {
+                socket.send(
+                    DatagramPacket(
+                        request,
+                        request.size,
+                        InetSocketAddress(address, port)
+                    )
                 )
-            )
+            } catch (e: Exception) {
+                Log.d(TAG, "Could not ask $address:$port", e)
+                return null
+            }
 
             val buffer = ByteArray(4096)
             val reply = DatagramPacket(buffer, buffer.size)
@@ -181,7 +179,12 @@ object Discovery {
                 return null
             }
 
-            return parse(String(reply.data, 0, reply.length))
+            val server = parse(String(reply.data, 0, reply.length)) ?: return null
+
+            // The address the answer came from is the one that reached the
+            // server, so it is the one that can reach it back.
+            val sourceUrl = "http://${reply.address.hostAddress}:${server.port}"
+            return server.copy(sourceUrl = sourceUrl)
         }
     }
 
@@ -200,6 +203,7 @@ object Discovery {
                 Server(
                     name = json.optString("name", "PiKaraoke"),
                     url = url,
+                    sourceUrl = url,
                     port = json.optInt("port", DEFAULT_PORT)
                 )
             }

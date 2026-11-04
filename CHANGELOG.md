@@ -13,4 +13,5 @@
 - An Android player app, in `android/`, that shows the splash screen
   full-screen and finds the server on the network by itself. The server
   answers a discovery request over UDP, so the app needs no address typed
-  in.
+  in. The address can be typed in as well, for when the search does not find
+  the server or finds one that cannot be reached.

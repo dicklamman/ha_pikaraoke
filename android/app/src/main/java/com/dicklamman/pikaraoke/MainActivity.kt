@@ -2,6 +2,7 @@ package com.dicklamman.pikaraoke
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
@@ -10,6 +11,7 @@ import android.os.Looper
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
@@ -19,6 +21,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.util.Log
 import java.util.concurrent.Executors
 
 /**
@@ -30,7 +33,8 @@ import java.util.concurrent.Executors
  *
  * The address is found rather than typed, because the player usually runs on a
  * television with a remote control and no keyboard. The app asks the network
- * for a PiKaraoke server, and only asks for an address when that fails.
+ * for a PiKaraoke server, and the address can be typed in when the search does
+ * not find one, or when the one it found cannot be reached.
  */
 class MainActivity : Activity() {
 
@@ -48,6 +52,15 @@ class MainActivity : Activity() {
     /** True while the app is looking for a server, so it does not look twice. */
     private var searching = false
 
+    /**
+     * The address to try when the server's own address cannot be reached.
+     *
+     * A server behind a router, or a container, reports an address that other
+     * devices cannot use, while the address the discovery answer came from is
+     * one that demonstrably reached it.
+     */
+    private var fallbackUrl: String? = null
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -61,13 +74,20 @@ class MainActivity : Activity() {
         configureWebView()
 
         findViewById<Button>(R.id.setup_connect).setOnClickListener {
-            val typed = setupAddress.text.toString().trim()
-            if (typed.isNotEmpty()) {
-                connect(normalizeUrl(typed))
-            }
+            connectToTypedAddress()
         }
         findViewById<Button>(R.id.setup_search).setOnClickListener {
             startSearch()
+        }
+        // The keyboard's own go action connects, so the address can be typed
+        // and confirmed without reaching for a button.
+        setupAddress.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_GO) {
+                connectToTypedAddress()
+                true
+            } else {
+                false
+            }
         }
 
         // The player runs for hours, so the screen must not sleep.
@@ -84,8 +104,26 @@ class MainActivity : Activity() {
             // The app was started with an address, so there is nothing to look for.
             connect(normalizeUrl(fromIntent))
         } else {
+            // The address can be typed in from the start, and the search runs
+            // at the same time: whichever finds a usable server first wins,
+            // and the other stays available for the user to use.
+            setupAddress.setText(savedServerUrl() ?: "")
+            setupAddress.requestFocus()
+            // The keyboard is brought up, because the address is the one thing
+            // the user may want to do here. A player on a television with a
+            // remote control ignores it and the search answers instead.
+            setupAddress.post {
+                val keyboard = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                keyboard.showSoftInput(setupAddress, InputMethodManager.SHOW_IMPLICIT)
+            }
             startSearch()
         }
+    }
+
+    /** The address the app used last time, if there was one. */
+    private fun savedServerUrl(): String? {
+        return getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getString(PREF_SERVER_URL, null)
     }
 
     /** Set the web view up for the splash screen's scripting, media and socket. */
@@ -121,10 +159,11 @@ class MainActivity : Activity() {
                 url: String,
                 favicon: android.graphics.Bitmap?
             ) {
-                // A page has started loading, so the address was good enough to
-                // reach something. The panel goes away, and comes back if the
-                // load turns out to have failed.
-                hideSetup()
+                // A load has started, so the address is at least well formed.
+                // The panel stays up until the page actually arrives, because a
+                // load that starts and then fails would otherwise leave a
+                // blank screen with no way back.
+                setupStatus.text = getString(R.string.setup_connecting)
             }
 
             override fun onPageFinished(view: WebView, url: String) {
@@ -139,7 +178,17 @@ class MainActivity : Activity() {
                 // Only the page itself failing matters. A missing image or a
                 // blocked font should not throw the player back to the setup
                 // screen while the splash is otherwise working.
-                if (request.isForMainFrame) {
+                if (!request.isForMainFrame) {
+                    return
+                }
+                // The address the server gave may be one that cannot be reached
+                // from here, so the address the discovery answer came from is
+                // tried before giving up.
+                val fallback = fallbackUrl
+                fallbackUrl = null
+                if (fallback != null) {
+                    connect(fallback)
+                } else {
                     showSetup(getString(R.string.setup_could_not_connect))
                 }
             }
@@ -161,16 +210,41 @@ class MainActivity : Activity() {
         showSetup(getString(R.string.setup_searching))
 
         background.execute {
-            val servers = Discovery.findServers()
+            // A search must never take the app down with it: a network that
+            // behaves oddly is a reason to ask for an address, not a crash.
+            val servers = try {
+                Discovery(this@MainActivity).findServers()
+            } catch (e: Exception) {
+                Log.w("PiKaraoke", "The search failed", e)
+                emptyList()
+            }
             mainHandler.post {
                 searching = false
                 val server = servers.firstOrNull()
                 if (server != null) {
+                    // The server was found. Its own address is tried first,
+                    // because that is the one its own splash screen shows and
+                    // the one other devices on the network use. The address the
+                    // answer came from is kept as a fallback, for when that one
+                    // cannot be reached from here.
+                    fallbackUrl = server.sourceUrl
+                    setupAddress.setText(server.url)
                     connect(server.url)
                 } else {
                     showSetup(getString(R.string.setup_not_found))
                 }
             }
+        }
+    }
+
+    /** Connect to the address that was typed in. */
+    private fun connectToTypedAddress() {
+        val typed = setupAddress.text.toString().trim()
+        if (typed.isNotEmpty()) {
+            // The user has said which address to use, so the fallback from a
+            // search no longer applies.
+            fallbackUrl = null
+            connect(normalizeUrl(typed))
         }
     }
 
@@ -224,17 +298,18 @@ class MainActivity : Activity() {
     }
 
     /**
-     * A back press goes back inside the page. There is no page history to leave
-     * from, so the press that would close the app is swallowed instead.
+     * A back press goes back inside the page.
+     *
+     * The player is the whole experience, so a press that would leave it
+     * brings up the address screen instead of closing the app: the address
+     * may need changing, and there is nowhere else to go.
      */
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (keyCode == KeyEvent.KEYCODE_BACK) {
             if (webView.visibility == View.VISIBLE && webView.canGoBack()) {
                 webView.goBack()
             } else {
-                // Back from the setup panel returns to the player that was
-                // showing before, rather than closing the app.
-                showSetup(getString(R.string.setup_not_found))
+                showSetup(getString(R.string.setup_change_address))
             }
             return true
         }

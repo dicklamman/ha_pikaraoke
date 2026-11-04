@@ -5,6 +5,7 @@
     <string name="setup_searching">Looking for a PiKaraoke server…</string>
     <string name="setup_connecting">Connecting…</string>
     <string name="setup_not_found">No PiKaraoke server found. Enter the address of your Home Assistant host.</string>
+    <string name="setup_change_address">Enter the address of your Home Assistant host, or search again.</string>
     <string name="setup_address_hint">192.168.0.10:5555</string>
     <string name="setup_connect">Connect</string>
     <string name="setup_search">Search again</string>
