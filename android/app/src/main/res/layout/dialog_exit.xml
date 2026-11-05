@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The question asked before the app is closed.
+
+     It is a layout of its own rather than the buttons a dialog brings with
+     it, because on a television the buttons of a stock dialog cannot be
+     reached with the arrow keys: the player is watched from the sofa, and
+     the answer has to be pickable with the remote. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingStart="32dp"
+    android:paddingTop="28dp"
+    android:paddingEnd="32dp"
+    android:paddingBottom="28dp">
+
+    <TextView
+        android:id="@+id/exit_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/exit_title"
+        android:textColor="@android:color/white"
+        android:textSize="30sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/exit_message"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:lineSpacingMultiplier="1.2"
+        android:text="@string/exit_message"
+        android:textColor="@android:color/darker_gray"
+        android:textSize="19sp" />
+
+    <!-- The buttons are stacked, so the arrow keys walk down them one at a
+         time. The one that is safest to press is offered first, and it is
+         the one that holds the focus when the question appears. -->
+    <Button
+        android:id="@+id/exit_stay"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="28dp"
+        android:background="@drawable/button_tv"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:minHeight="60dp"
+        android:nextFocusDown="@+id/exit_confirm"
+        android:nextFocusUp="@+id/exit_change_address"
+        android:text="@string/exit_stay"
+        android:textAllCaps="false"
+        android:textColor="@color/tv_button_text"
+        android:textSize="20sp" />
+
+    <Button
+        android:id="@+id/exit_confirm"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:background="@drawable/button_tv"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:minHeight="60dp"
+        android:nextFocusDown="@+id/exit_change_address"
+        android:nextFocusUp="@+id/exit_stay"
+        android:text="@string/exit_confirm"        android:textAllCaps="false"
+        android:textColor="@color/tv_button_text"
+        android:textSize="20sp" />
+
+    <Button
+        android:id="@+id/exit_change_address"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:background="@drawable/button_tv"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:minHeight="60dp"
+        android:nextFocusUp="@+id/exit_confirm"
+        android:text="@string/exit_change_address"
+        android:textAllCaps="false"
+        android:textColor="@color/tv_button_text"
+        android:textSize="20sp" />
+
+</LinearLayout>

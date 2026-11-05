@@ -1,4 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="ic_launcher_background">#141418</color>
+
+    <!-- The colours of the buttons on the television. The focused one is
+         much brighter than the others, because the focus is the only way
+         the user knows where they are. -->
+    <color name="tv_button_background">#1E1E24</color>
+    <color name="tv_button_border">#4A4A55</color>
+    <color name="tv_button_focused">#2E7DF7</color>
+    <color name="tv_button_focused_border">#FFFFFF</color>
+    <color name="tv_button_pressed">#1F5FCC</color>
+    <color name="tv_button_text">#FFFFFF</color>
 </resources>

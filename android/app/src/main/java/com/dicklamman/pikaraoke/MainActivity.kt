@@ -98,6 +98,15 @@ class MainActivity : Activity() {
             }
         }
 
+        // The address field brings up the keyboard when it is chosen, so a
+        // person with a keyboard can type straight away, while someone using
+        // a remote can walk past it without the keyboard ever appearing.
+        setupAddress.setOnFocusChangeListener { _, hasFocus ->
+            if (hasFocus) {
+                showKeyboard()
+            }
+        }
+
         // The player runs for hours, so the screen must not sleep.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -121,14 +130,13 @@ class MainActivity : Activity() {
             // The address can be typed in from the start, and the search runs
             // at the same time: whichever finds a usable server first wins,
             // and the other stays available for the user to use.
+            //
+            // The focus starts on the address, and the keyboard comes up with
+            // it, because the address is the one thing the user may want to
+            // do here. A player on a television with a remote control ignores
+            // the keyboard and the search answers instead.
             setupAddress.requestFocus()
-            // The keyboard is brought up, because the address is the one thing
-            // the user may want to do here. A player on a television with a
-            // remote control ignores it and the search answers instead.
-            setupAddress.post {
-                val keyboard = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-                keyboard.showSoftInput(setupAddress, InputMethodManager.SHOW_IMPLICIT)
-            }
+            setupAddress.post { showKeyboard() }
             startSearch()
         }
     }
@@ -137,6 +145,12 @@ class MainActivity : Activity() {
     private fun savedServerUrl(): String? {
         return getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             .getString(PREF_SERVER_URL, null)
+    }
+
+    /** Bring up the keyboard, so the address can be typed in. */
+    private fun showKeyboard() {
+        val keyboard = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        keyboard.showSoftInput(setupAddress, InputMethodManager.SHOW_IMPLICIT)
     }
 
     /** Set the web view up for the splash screen's scripting, media and socket. */
@@ -274,6 +288,25 @@ class MainActivity : Activity() {
     }
 
     /**
+     * Put the keyboard away.
+     *
+     * The address has been given, so the keyboard has nothing left to do.
+     * On a television it covers half the screen, and it is the one thing
+     * that gets in the way of the player.
+     *
+     * The focus moves to the button that starts the connection, so the
+     * arrow keys of a remote have something to land on.
+     */
+    private fun hideKeyboard() {
+        val keyboard = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        keyboard.hideSoftInputFromWindow(setupAddress.windowToken, 0)
+        // The address gives up the focus, so the keyboard does not come back
+        // on its own, and the button that starts the connection takes it.
+        setupAddress.clearFocus()
+        findViewById<Button>(R.id.setup_connect)?.requestFocus()
+    }
+
+    /**
      * Show the splash screen from a server at the given address.
      *
      * The setup panel stays up until the page arrives, so that a server which
@@ -281,6 +314,8 @@ class MainActivity : Activity() {
      */
     private fun connect(url: String) {
         serverUrl = url
+        // The address is settled, so the keyboard is not needed any more.
+        hideKeyboard()
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             .edit()
             .putString(PREF_SERVER_URL, url)
@@ -305,6 +340,10 @@ class MainActivity : Activity() {
     private fun hideSetup() {
         setupPanel.visibility = View.GONE
         webView.visibility = View.VISIBLE
+        // The player takes the focus, so the arrow keys of a remote reach the
+        // splash screen and not the buttons of a panel that is no longer
+        // there.
+        webView.requestFocus()
     }
 
     /**
@@ -352,20 +391,38 @@ class MainActivity : Activity() {
      * Confirming closes the app for good. Declining returns to the player,
      * which is where a player belongs. Changing the address is offered here
      * too, because the back button no longer leads to the address screen.
+     *
+     * The question is a layout of its own, so that every answer is a button
+     * the arrow keys of a television remote can land on. The stock dialog
+     * buttons cannot be reached that way, which would leave someone sitting
+     * in front of the television with no way to answer.
      */
     private fun confirmExit() {
         val dialog = AlertDialog.Builder(this)
-            .setTitle(R.string.exit_title)
-            .setMessage(R.string.exit_message)
-            .setNeutralButton(R.string.exit_change_address) { _, _ -> showAddressScreen() }
-            .setNegativeButton(R.string.exit_stay) { d, _ -> d.dismiss() }
-            .setPositiveButton(R.string.exit_confirm) { _, _ -> finish() }
+            .setView(R.layout.dialog_exit)
             .create()
+
+        // The remote's back button answers the question the same way the
+        // player itself does: it does not close the app by accident.
+        dialog.setOnKeyListener { _, keyCode, event ->
+            if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
+                dialog.dismiss()
+                true
+            } else {
+                false
+            }
+        }
 
         dialog.setOnShowListener {
             // The player is paused while the question is on screen, so the
             // song does not play to nobody behind a dialog.
             webView.onPause()
+
+            // The focus starts on the answer that keeps the player running,
+            // so a stray press of the middle of the remote does nothing.
+            val stay = dialog.findViewById<Button>(R.id.exit_stay)
+            stay?.requestFocus()
+            wireUpAnswerKeys(dialog)
         }
         dialog.setOnDismissListener {
             // The dialog may have closed the app, in which case the player
@@ -375,7 +432,53 @@ class MainActivity : Activity() {
             }
         }
 
+        // The layout is only put together once the question is on screen, so
+        // the answers are wired up afterwards.
         dialog.show()
+
+        dialog.findViewById<Button>(R.id.exit_stay)?.setOnClickListener {
+            dialog.dismiss()
+        }
+        dialog.findViewById<Button>(R.id.exit_confirm)?.setOnClickListener {
+            dialog.dismiss()
+            finish()
+        }
+        dialog.findViewById<Button>(R.id.exit_change_address)?.setOnClickListener {
+            dialog.dismiss()
+            showAddressScreen()
+        }
+    }
+
+    /**
+     * Make the arrow keys of a remote walk the answers one at a time.
+     *
+     * The answers are stacked down the screen, so the up and down keys move
+     * between them. The order is fixed here rather than left to the system,
+     * because the system is free to skip a button, and a remote that skips
+     * an answer is a remote that presses the wrong thing.
+     */
+    private fun wireUpAnswerKeys(dialog: AlertDialog) {
+        // The answers, in the order they are shown.
+        val order = listOf(R.id.exit_stay, R.id.exit_confirm, R.id.exit_change_address)
+
+        for ((index, id) in order.withIndex()) {
+            val button = dialog.findViewById<Button>(id) ?: continue
+            val next = order[(index + 1) % order.size]
+            val previous = order[(index - 1 + order.size) % order.size]
+
+            button.setOnKeyListener { _, keyCode, event ->
+                if (event.action != KeyEvent.ACTION_DOWN) {
+                    return@setOnKeyListener false
+                }
+                val target = when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT -> next
+                    KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_LEFT -> previous
+                    else -> return@setOnKeyListener false
+                }
+                dialog.findViewById<Button>(target)?.requestFocus()
+                true
+            }
+        }
     }
 
     /**
@@ -386,8 +489,11 @@ class MainActivity : Activity() {
      */
     private fun showAddressScreen() {
         setupAddress.setText(serverUrl ?: savedServerUrl() ?: "")
-        setupAddress.requestFocus()
         showSetup(getString(R.string.setup_change_address))
+        // The address is where the question leads, so the focus goes there.
+        // The keyboard stays away until the address is asked for, because
+        // the person may be using a remote rather than a keyboard.
+        setupAddress.requestFocus()
     }
 
     override fun onPause() {
