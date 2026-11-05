@@ -104,6 +104,24 @@ class MainActivity : Activity() {
         setupAddress.setOnFocusChangeListener { _, hasFocus ->
             if (hasFocus) {
                 showKeyboard()
+            } else {
+                // Walking away from the address puts the keyboard away too,
+                // so it does not cover the buttons the remote is walking
+                // over.
+                dismissKeyboard()
+            }
+        }
+
+        // The down arrow leaves the address field for the buttons, and the up
+        // arrow comes back to it. The keyboard has a habit of swallowing the
+        // down arrow, so the move is made here rather than left to the
+        // system, which would leave someone on a remote stuck in the field.
+        setupAddress.setOnKeyListener { _, keyCode, event ->
+            if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && event.action == KeyEvent.ACTION_DOWN) {
+                findViewById<Button>(R.id.setup_connect)?.requestFocus()
+                true
+            } else {
+                false
             }
         }
 
@@ -151,6 +169,59 @@ class MainActivity : Activity() {
     private fun showKeyboard() {
         val keyboard = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
         keyboard.showSoftInput(setupAddress, InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    /** Put the keyboard away, without moving the focus anywhere. */
+    private fun dismissKeyboard() {
+        val keyboard = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        keyboard.hideSoftInputFromWindow(setupAddress.windowToken, 0)
+    }
+
+    /**
+     * Make the arrow keys of a remote walk the buttons of the address screen.
+     *
+     * The buttons sit side by side, so the left and right keys move between
+     * them and the up key goes back to the address. The order is fixed here
+     * rather than left to the system, because the system is free to skip a
+     * button, and a remote that skips a button is a remote that presses
+     * the wrong thing.
+     */
+    private fun wireUpSetupKeys() {
+        val connect = findViewById<Button>(R.id.setup_connect) ?: return
+        val search = findViewById<Button>(R.id.setup_search)
+        val back = findViewById<Button>(R.id.setup_back_to_player)
+
+        // The buttons in the order they are shown. The one that returns to
+        // the player is only there once there is a player to return to, so
+        // it is left out when it is hidden.
+        val order = listOfNotNull(connect, search, back)
+            .filter { it.visibility == View.VISIBLE }
+
+        for ((index, button) in order.withIndex()) {
+            val next = order[(index + 1) % order.size]
+            val previous = order[(index - 1 + order.size) % order.size]
+
+            button.setOnKeyListener { _, keyCode, event ->
+                if (event.action != KeyEvent.ACTION_DOWN) {
+                    return@setOnKeyListener false
+                }
+                when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                        next.requestFocus()
+                        true
+                    }
+                    KeyEvent.KEYCODE_DPAD_LEFT -> {
+                        previous.requestFocus()
+                        true
+                    }
+                    KeyEvent.KEYCODE_DPAD_UP -> {
+                        setupAddress.requestFocus()
+                        true
+                    }
+                    else -> false
+                }
+            }
+        }
     }
 
     /** Set the web view up for the splash screen's scripting, media and socket. */
@@ -334,6 +405,10 @@ class MainActivity : Activity() {
         // go back to.
         findViewById<Button>(R.id.setup_back_to_player).visibility =
             if (serverUrl.isNullOrBlank()) View.GONE else View.VISIBLE
+        // The buttons are wired up once they are on the screen, because
+        // which of them are there depends on whether there is a player to
+        // go back to.
+        wireUpSetupKeys()
     }
 
     /** Hide the setup panel, so the player is the only thing on the screen. */

@@ -15,8 +15,9 @@
          without a keyboard is not left without a way to reach the server.
 
          Everything here is sized for a television: the text is large enough
-         to read from a sofa, and every button can be reached with the arrow
-         keys of a remote. -->
+         to read from a sofa, and every button is wide enough to be picked
+         out from across the room, and can be reached with the arrow keys of
+         a remote. -->
     <LinearLayout
         android:id="@+id/setup_panel"
         android:layout_width="match_parent"
@@ -56,33 +57,39 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
-            android:autofillHints="hostname"
             android:focusable="true"
             android:focusableInTouchMode="true"
             android:hint="@string/setup_address_hint"
             android:imeOptions="actionGo"
-            android:inputType="textUri"
+            android:importantForAutofill="no"
+            android:inputType="textUri|textNoSuggestions"
             android:maxLines="1"
             android:minHeight="60dp"
+            android:nextFocusDown="@+id/setup_connect"
+            android:password="false"
             android:textColor="@android:color/white"
             android:textColorHint="@android:color/darker_gray"
             android:textSize="22sp" />
 
+        <!-- The buttons share the width of the screen between them, so each
+             one is a large target that the remote can land on. The row is
+             put in a container of its own so the buttons can grow to fill
+             it. -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:gravity="center"
+            android:layout_marginTop="20dp"
             android:orientation="horizontal">
 
             <Button
                 android:id="@+id/setup_connect"
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
+                android:layout_weight="1"
                 android:background="@drawable/button_tv"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
-                android:minHeight="60dp"
+                android:minHeight="64dp"
                 android:nextFocusRight="@+id/setup_search"
                 android:text="@string/setup_connect"
                 android:textAllCaps="false"
@@ -91,13 +98,14 @@
 
             <Button
                 android:id="@+id/setup_search"
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="12dp"
+                android:layout_weight="1"
                 android:background="@drawable/button_tv"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
-                android:minHeight="60dp"
+                android:minHeight="64dp"
                 android:nextFocusLeft="@+id/setup_connect"
                 android:nextFocusRight="@+id/setup_back_to_player"
                 android:text="@string/setup_search"
@@ -109,13 +117,14 @@
                  by mistake and the song is already playing. -->
             <Button
                 android:id="@+id/setup_back_to_player"
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="12dp"
+                android:layout_weight="1"
                 android:background="@drawable/button_tv"
                 android:focusable="true"
                 android:focusableInTouchMode="true"
-                android:minHeight="60dp"
+                android:minHeight="64dp"
                 android:nextFocusLeft="@+id/setup_search"
                 android:text="@string/setup_back_to_player"
                 android:textAllCaps="false"
