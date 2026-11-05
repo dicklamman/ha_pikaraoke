@@ -62,7 +62,7 @@
             android:hint="@string/setup_address_hint"
             android:imeOptions="actionGo"
             android:importantForAutofill="no"
-            android:inputType="textUri|textNoSuggestions"
+            android:inputType="text|textNoSuggestions"
             android:maxLines="1"
             android:minHeight="60dp"
             android:nextFocusDown="@+id/setup_connect"

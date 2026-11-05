@@ -9,9 +9,11 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.InputType
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.webkit.WebChromeClient
 import android.webkit.WebChromeClient.CustomViewCallback
@@ -74,6 +76,23 @@ class MainActivity : Activity() {
         setupAddress = findViewById(R.id.setup_address)
 
         configureWebView()
+
+        // The address is never a secret, but the keyboard on a television may
+        // still hide what is typed into it. The keyboard that comes with
+        // Google TV, for one, decides whether a field is secret from the
+        // input type alone: a field it takes to be a password is shown as
+        // dots, which leaves the user looking at a row of bullets instead of
+        // the address they are typing.
+        //
+        // So the field is given the plainest input type there is. It carries
+        // no variation of its own, which is what marks it as an ordinary
+        // field, and it has no transformation method, so nothing can turn
+        // the text into dots on the way to the screen.
+        setupAddress.transformationMethod = null
+        setupAddress.setRawInputType(
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        )
+        setupAddress.imeOptions = EditorInfo.IME_ACTION_GO
 
         findViewById<Button>(R.id.setup_connect).setOnClickListener {
             connectToTypedAddress()
