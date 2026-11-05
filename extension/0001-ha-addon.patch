@@ -330,7 +330,7 @@ index 0000000..8bd5a58
 +        }
 +        return json.dumps(payload).encode("utf-8")
 diff --git a/pikaraoke/lib/download_manager.py b/pikaraoke/lib/download_manager.py
-index 3603c13..32c78bf 100644
+index 5062df2..46546ea 100644
 --- a/pikaraoke/lib/download_manager.py
 +++ b/pikaraoke/lib/download_manager.py
 @@ -13,6 +13,7 @@ from gevent import Greenlet, spawn
@@ -341,7 +341,7 @@ index 3603c13..32c78bf 100644
  from pikaraoke.lib.preference_manager import PreferenceManager
  from pikaraoke.lib.queue_manager import QueueManager
  from pikaraoke.lib.song_manager import SongManager
-@@ -440,6 +441,23 @@ class DownloadManager:
+@@ -443,6 +444,23 @@ class DownloadManager:
          )
          return True
  
@@ -365,7 +365,7 @@ index 3603c13..32c78bf 100644
      def _execute_download(self, request: dict) -> int:
          """Execute a video download, re-queueing it if it fails with attempts to spare.
  
-@@ -526,6 +544,7 @@ class DownloadManager:
+@@ -529,6 +547,7 @@ class DownloadManager:
                      logging.warning("No video ID available to find downloaded song")
  
              if song_path:
@@ -375,10 +375,10 @@ index 3603c13..32c78bf 100644
                  logging.warning(
 diff --git a/pikaraoke/lib/ha_network.py b/pikaraoke/lib/ha_network.py
 new file mode 100644
-index 0000000..6980ef5
+index 0000000..4049ba3
 --- /dev/null
 +++ b/pikaraoke/lib/ha_network.py
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,226 @@
 +"""Resolve the Home Assistant host's LAN address from inside an add-on.
 +
 +An add-on runs in a container on the Supervisor's internal Docker network, so
@@ -391,6 +391,7 @@ index 0000000..6980ef5
 +the caller keeps whatever it detected itself.
 +"""
 +
++import ipaddress
 +import logging
 +import os
 +
@@ -461,6 +462,80 @@ index 0000000..6980ef5
 +    return {}
 +
 +
++def _docker_network(payload: dict) -> ipaddress.IPv4Network | None:
++    """Return the Supervisor's internal Docker network, if the payload names one.
++
++    An address inside that network belongs to the container network rather than
++    to the network the host is on, so it is not an address a client can use.
++
++    Args:
++        payload: The decoded body of a Supervisor network info response.
++
++    Returns:
++        The Docker network, or None when the payload does not name one.
++    """
++    docker = payload.get("docker")
++    if not isinstance(docker, dict):
++        return None
++    address = docker.get("address")
++    if not isinstance(address, str):
++        return None
++    try:
++        return ipaddress.ip_network(address, strict=False)
++    except ValueError:
++        return None
++
++
++def _is_usable(address: str, docker_network: ipaddress.IPv4Network | None) -> bool:
++    """Say whether an address can be reached from the network the host is on.
++
++    Args:
++        address: The bare IPv4 address to check.
++        docker_network: The Supervisor's internal Docker network, if known.
++
++    Returns:
++        True when the address is one a client on the network could use.
++    """
++    if address.startswith(_UNUSABLE_PREFIXES):
++        return False
++    if docker_network is None:
++        return True
++    try:
++        return ipaddress.ip_address(address) not in docker_network
++    except ValueError:
++        return False
++
++
++def unwrap_response(body: object) -> dict | None:
++    """Return the payload of a Supervisor API response.
++
++    The Supervisor wraps every answer in an envelope: the payload itself sits
++    under "data", with "result" saying whether the call succeeded. A caller
++    that looks for the payload at the top level finds nothing and concludes the
++    host has no usable address, which leaves the add-on showing its own
++    container address instead.
++
++    Args:
++        body: The decoded body of a Supervisor response.
++
++    Returns:
++        The payload, or None when the body is not a usable response.
++    """
++    if not isinstance(body, dict):
++        return None
++
++    # A response that carries "result" is an envelope, so the payload is under
++    # "data". A body without one is the payload itself, which keeps this
++    # working against a Supervisor that answers with the bare object.
++    if "result" in body:
++        if body.get("result") != "ok":
++            return None
++        data = body.get("data")
++        return data if isinstance(data, dict) else None
++
++    return body
++
++
 +def select_lan_ip(payload: dict) -> str | None:
 +    """Pick the host's LAN address out of a Supervisor network info response.
 +
@@ -477,13 +552,15 @@ index 0000000..6980ef5
 +    if not isinstance(interfaces, list):
 +        return None
 +
++    docker_network = _docker_network(payload)
++
 +    fallback: str | None = None
 +    for interface in interfaces:
 +        if not isinstance(interface, dict):
 +            continue
 +        block = _ipv4_block(interface)
 +        address = _first_usable_address(block.get("addresses") or block.get("address"))
-+        if not address:
++        if not address or not _is_usable(address, docker_network):
 +            continue
 +        if interface.get("primary"):
 +            return address
@@ -511,7 +588,7 @@ index 0000000..6980ef5
 +            timeout=REQUEST_TIMEOUT_SECONDS,
 +        )
 +        response.raise_for_status()
-+        payload = response.json()
++        body = response.json()
 +    except requests.RequestException as e:
 +        logging.warning(f"Could not read the host network info from the Supervisor: {e}")
 +        return None
@@ -519,11 +596,15 @@ index 0000000..6980ef5
 +        logging.warning(f"The Supervisor returned network info that is not JSON: {e}")
 +        return None
 +
-+    if not isinstance(payload, dict):
++    payload = unwrap_response(body)
++    if payload is None:
 +        logging.warning("The Supervisor returned network info in an unexpected shape.")
 +        return None
 +
-+    return select_lan_ip(payload)
++    address = select_lan_ip(payload)
++    if address is None:
++        logging.warning("The Supervisor reported no usable address for the host.")
++    return address
 diff --git a/pikaraoke/lib/lyrics.py b/pikaraoke/lib/lyrics.py
 new file mode 100644
 index 0000000..5198673
@@ -926,10 +1007,10 @@ index d85a791..434296d 100644
              "low": k.low_score_phrases,
              "mid": k.mid_score_phrases,
 diff --git a/pikaraoke/static/js/splash.js b/pikaraoke/static/js/splash.js
-index 9924827..aea17aa 100644
+index 91b9ec9..7f1064f 100644
 --- a/pikaraoke/static/js/splash.js
 +++ b/pikaraoke/static/js/splash.js
-@@ -400,11 +400,16 @@ const handleNowPlayingUpdate = (np) => {
+@@ -403,11 +403,16 @@ const handleNowPlayingUpdate = (np) => {
  
    const video = getVideoPlayer();
  
@@ -1122,7 +1203,7 @@ index 0000000..df303af
 +            raise AssertionError("expected the socket to time out")
 +        return issubclass(exc_type, socket.timeout)
 diff --git a/tests/unit/test_download_manager.py b/tests/unit/test_download_manager.py
-index 7f6de94..b5694ff 100644
+index 732b079..71673c7 100644
 --- a/tests/unit/test_download_manager.py
 +++ b/tests/unit/test_download_manager.py
 @@ -40,6 +40,18 @@ def no_reprioritize():
@@ -1162,8 +1243,8 @@ index 7f6de94..b5694ff 100644
  
  
  @pytest.fixture
-@@ -175,9 +192,71 @@ class TestDownloadManagerQueueDownload:
-         assert item["video_url"] == "https://youtube.com/watch?v=test123"
+@@ -184,9 +201,71 @@ class TestDownloadManagerQueueDownload:
+         assert download_manager.pending_downloads == []
  
  
 +class TestFetchLyricsOnDownload:
@@ -1237,10 +1318,10 @@ index 7f6de94..b5694ff 100644
      @patch("pikaraoke.lib.download_manager.build_ytdl_download_command")
 diff --git a/tests/unit/test_ha_network.py b/tests/unit/test_ha_network.py
 new file mode 100644
-index 0000000..e48caff
+index 0000000..bf0ca66
 --- /dev/null
 +++ b/tests/unit/test_ha_network.py
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,245 @@
 +"""Unit tests for the Home Assistant host network module."""
 +
 +from unittest.mock import MagicMock, patch
@@ -1250,6 +1331,7 @@ index 0000000..e48caff
 +from pikaraoke.lib.ha_network import (
 +    get_supervisor_lan_ip,
 +    select_lan_ip,
++    unwrap_response,
 +)
 +
 +
@@ -1266,6 +1348,11 @@ index 0000000..e48caff
 +        ],
 +        "docker": {"interface": "hassio", "address": "172.30.32.0/23"},
 +    }
++
++
++def _envelope(payload):
++    """A Supervisor response, wrapped the way the Supervisor wraps it."""
++    return {"result": "ok", "data": payload}
 +
 +
 +def _v2_payload(address="192.168.0.10/24", primary=True):
@@ -1339,6 +1426,42 @@ index 0000000..e48caff
 +        """A payload that is not shaped like a response holds no address."""
 +        assert select_lan_ip({"interfaces": "not a list"}) is None
 +
++    def test_skips_an_address_inside_the_docker_network(self):
++        """A container address on the Supervisor's network cannot be reached."""
++        payload = {
++            "interfaces": [
++                {
++                    "interface": "hassio",
++                    "primary": True,
++                    "ipv4": {"address": ["172.30.33.14/23"]},
++                }
++            ],
++            "docker": {"interface": "hassio", "address": "172.30.32.0/23"},
++        }
++        assert select_lan_ip(payload) is None
++
++
++class TestUnwrapResponse:
++    """Tests for taking the payload out of a Supervisor response."""
++
++    def test_unwraps_the_envelope(self):
++        """The Supervisor puts the payload under "data"."""
++        payload = _v1_payload()
++        assert unwrap_response(_envelope(payload)) == payload
++
++    def test_reads_a_bare_payload(self):
++        """A body without an envelope is the payload itself."""
++        payload = _v1_payload()
++        assert unwrap_response(payload) == payload
++
++    def test_rejects_an_error_response(self):
++        """A response that reports a failure holds no payload."""
++        assert unwrap_response({"result": "error", "message": "nope"}) is None
++
++    def test_rejects_a_body_that_is_not_an_object(self):
++        """A body that is not an object holds no payload."""
++        assert unwrap_response(["not", "an", "object"]) is None
++
 +
 +class TestGetSupervisorLanIp:
 +    """Tests for asking the Supervisor for the host address."""
@@ -1354,6 +1477,19 @@ index 0000000..e48caff
 +
 +        _, kwargs = mock_get.call_args
 +        assert kwargs["headers"]["Authorization"] == "Bearer secret"
++
++    def test_returns_the_host_address_from_a_wrapped_response(self):
++        """The Supervisor wraps its answer, and the payload has to be unwrapped.
++
++        Without this the add-on finds no address in the response and falls back
++        to its own container address, which is what the QR code then shows.
++        """
++        response = MagicMock()
++        response.json.return_value = _envelope(_v1_payload())
++
++        with patch.dict("os.environ", {"SUPERVISOR_TOKEN": "secret"}):
++            with patch("requests.get", return_value=response):
++                assert get_supervisor_lan_ip() == "192.168.0.10"
 +
 +    def test_returns_none_outside_home_assistant(self):
 +        """Without a Supervisor token there is nothing to ask."""

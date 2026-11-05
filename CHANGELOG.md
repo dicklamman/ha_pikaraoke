@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.23.1
+
+- Fix the address on the splash screen and in the QR code. The Supervisor
+  wraps its answer in an envelope, so the host's address was never found in
+  it and the add-on fell back to its own container address
+  (`172.30.33.x`), which nothing outside Home Assistant can reach. The
+  address is now the host's own (`192.168.x.x`), as the Supervisor reports it.
+- The extension is regenerated against the current upstream code, so the
+  add-on builds again after an upstream update.
+
 ## 1.23.0
 
 - Initial Home Assistant add-on release.

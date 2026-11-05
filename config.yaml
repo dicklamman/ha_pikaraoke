@@ -1,6 +1,6 @@
 ---
 name: PiKaraoke
-version: "1.23.0"
+version: "1.23.1"
 slug: pikaraoke
 description: YouTube-based karaoke machine, running as a Home Assistant add-on
 url: https://github.com/dicklamman/ha_pikaraoke
