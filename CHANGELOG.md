@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.23.2
+
+- Move the QR code and the address to the top-left corner of the splash
+  screen. They sat at the bottom left, where the "up next" announcement and
+  the menu button now have room.
+- The menu button and the notification toasts move to the bottom left, so
+  they no longer sit on top of the QR code.
+
 ## 1.23.1
 
 - Fix the address on the splash screen and in the QR code. The Supervisor

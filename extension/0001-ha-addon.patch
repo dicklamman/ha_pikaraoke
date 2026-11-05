@@ -1007,7 +1007,7 @@ index d85a791..434296d 100644
              "low": k.low_score_phrases,
              "mid": k.mid_score_phrases,
 diff --git a/pikaraoke/static/js/splash.js b/pikaraoke/static/js/splash.js
-index 91b9ec9..7f1064f 100644
+index 91b9ec9..9b83b06 100644
 --- a/pikaraoke/static/js/splash.js
 +++ b/pikaraoke/static/js/splash.js
 @@ -403,11 +403,16 @@ const handleNowPlayingUpdate = (np) => {
@@ -1029,6 +1029,42 @@ index 91b9ec9..7f1064f 100644
      $("#video-source").attr("src", "");
      video.load();
      $("#video-source").attr("src", streamUrl);
+@@ -478,6 +483,9 @@ const setupOverlayMenus = () => {
+   if (PikaraokeConfig.hideOverlay) {
+     $('#bottom-container').hide();
+     $('#top-container').hide();
++    // The QR code and the address moved to the top-left corner, into the
++    // access-point container, so they are hidden on their own here.
++    $('#qr-code').hide();
+   }
+   $("#menu a").fadeOut(); // start hidden
+   const triggerInactivity = () => {
+@@ -624,6 +632,7 @@ const PREFERENCE_EFFECTS = {
+   hide_overlay:        (v) => {
+     PikaraokeConfig.hideOverlay = v;
+     $("#bottom-container, #top-container").toggle(!v);
++    $("#qr-code").toggle(!v);
+   },
+   hide_url:            (v) => { $(".splash-url").toggle(!v); },
+   hide_qr_code:        (v) => { $(".splash-qr-image").toggle(!v); },
+@@ -780,14 +789,15 @@ const UI_SCALE_TARGETS = [
+   // about its own centre and the two overlap.
+   { selector: '#logo-container > div', origin: null },
+   { selector: '#top-container', origin: 'top right' },
++  // The QR code and the address live in the top-left corner, inside the
++  // access-point container, so that container's own scale already covers them.
+   { selector: '#ap-container', origin: 'top left' },
+-  { selector: '#qr-code', origin: 'bottom left' },
+   { selector: '#up-next', origin: 'bottom right' },
+   { selector: '#dvd', origin: null },
+   { selector: '#your-score-text', origin: null },
+   { selector: '#score-number-text', origin: null },
+   { selector: '#score-review-text', origin: null },
+-  { selector: '#splash-notification', origin: 'top left' },
++  { selector: '#splash-notification', origin: 'bottom left' },
+   { selector: '#clock', origin: 'top left' },
+ ];
+ 
 diff --git a/pikaraoke/templates/settings.html b/pikaraoke/templates/settings.html
 index 33a7801..ce4beef 100644
 --- a/pikaraoke/templates/settings.html
@@ -1047,6 +1083,104 @@ index 33a7801..ce4beef 100644
  				<div class="panel-block px-5 py-3 is-justify-content-space-between">
  					<label for="pref-browse-per-page">{# MSG: Label for the dropdown choosing how many songs are shown per page on the Songs page. #} {% trans %}Songs per page{% endtrans %}</label>
  					<div class="select is-flex-shrink-0 ml-4">
+diff --git a/pikaraoke/templates/splash.html b/pikaraoke/templates/splash.html
+index 235c55c..c5a6ac5 100644
+--- a/pikaraoke/templates/splash.html
++++ b/pikaraoke/templates/splash.html
+@@ -63,15 +63,6 @@
+ </div>
+ 
+ <div id="ap-container" class="overlay">
+-  <div id="clock" class="stroke has-text-white is-size-4" style="display: none;"></div>
+-  <div class="is-size-6 stroke">
+-    <div id="hostap">
+-      {% for line in hostap_info %}{{ line }}<br />{% endfor %}
+-    </div>
+-  </div>
+-</div>
+-
+-<div id="bottom-container" class="overlay">
+   <div id="qr-code">
+     <img
+       class="splash-qr-image"
+@@ -84,7 +75,15 @@
+       <div>&nbsp;{{ url }}</div>
+     </div>
+   </div>
+-  <div></div>
++  <div id="clock" class="stroke has-text-white is-size-4" style="display: none;"></div>
++  <div class="is-size-6 stroke">
++    <div id="hostap">
++      {% for line in hostap_info %}{{ line }}<br />{% endfor %}
++    </div>
++  </div>
++</div>
++
++<div id="bottom-container" class="overlay">
+   <div
+     id="up-next"
+     class="has-text-warning is-size-5 stroke has-text-right"
+@@ -237,23 +236,25 @@
+     max-width: 75%;
+   }
+   #ap-container {
++    /* The QR code and the address sit in the top-left corner, with the clock
++       and the access-point details stacked underneath them. */
+     top: 0px;
+     left: 0px;
+     max-width: 50%;
+     display: flex;
+-    justify-content: space-between;
+-    align-items: flex-end;
++    flex-direction: column;
++    align-items: flex-start;
++    justify-content: flex-start;
+   }
+   #bottom-container {
+     bottom: 0px;
+     left: 0px;
+     width: 100%;
+     display: flex;
+-    justify-content: space-between;
++    justify-content: flex-end;
+     align-items: flex-end;
+-  }
+-  #qr-code {
+-    max-width: 25%;
++  }  #qr-code {
++    max-width: 100%;
+   }
+   #up-next {
+     max-width: 75%;
+@@ -320,9 +321,11 @@
+ 	 height: 100vh;
+   }
+   #menu {
++    /* The top-left corner belongs to the QR code and the address, so the
++       menu button sits at the bottom left instead. */
+     position: absolute;
+     z-index: 5;
+-    top: 10px;
++    bottom: 15px;
+     left: 20px;
+   }
+   #clock {
+@@ -368,11 +371,12 @@
+   .timestamp {
+     font-family: monospace;
+   }
+-  /* A toast stack anchored top-left over the video. */
++  /* A toast stack anchored bottom-left over the video, above the menu
++     button. The top-left corner belongs to the QR code and the address. */
+   #splash-notification {
+     position: absolute;
+-    top: 15px;
+-    left: 50px;
++    bottom: 60px;
++    left: 20px;
+     z-index: 6;
+     display: flex;
+     flex-direction: column;
 diff --git a/tests/conftest.py b/tests/conftest.py
 index 194ea24..62b1720 100644
 --- a/tests/conftest.py
