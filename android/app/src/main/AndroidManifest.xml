@@ -17,7 +17,7 @@
 
     <application
         android:allowBackup="true"
-        android:banner="@mipmap/ic_launcher"
+        android:banner="@mipmap/ic_banner"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher"
@@ -33,7 +33,17 @@
             android:screenOrientation="sensorLandscape">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
+
+                <!-- The ordinary launcher category, so the player is found on
+                     a phone or a tablet as well as on a television. -->
                 <category android:name="android.intent.category.LAUNCHER" />
+
+                <!-- The television launcher looks for this one, and only for
+                     this one, when it builds the list of apps on the home
+                     screen. Without it the player is installed on a
+                     television but never appears on the home page, so the
+                     only way to start it is to find it in the settings. -->
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
 
