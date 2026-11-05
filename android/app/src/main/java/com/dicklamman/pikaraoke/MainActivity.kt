@@ -2,6 +2,7 @@ package com.dicklamman.pikaraoke
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -13,6 +14,7 @@ import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.webkit.WebChromeClient
+import android.webkit.WebChromeClient.CustomViewCallback
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -79,6 +81,12 @@ class MainActivity : Activity() {
         findViewById<Button>(R.id.setup_search).setOnClickListener {
             startSearch()
         }
+        findViewById<Button>(R.id.setup_back_to_player).setOnClickListener {
+            val current = serverUrl ?: savedServerUrl()
+            if (!current.isNullOrBlank()) {
+                connect(normalizeUrl(current))
+            }
+        }
         // The keyboard's own go action connects, so the address can be typed
         // and confirmed without reaching for a button.
         setupAddress.setOnEditorActionListener { _, actionId, _ ->
@@ -100,14 +108,19 @@ class MainActivity : Activity() {
         }
 
         val fromIntent = intent?.getStringExtra(EXTRA_SERVER_URL)
+        val saved = savedServerUrl()
         if (!fromIntent.isNullOrBlank()) {
             // The app was started with an address, so there is nothing to look for.
             connect(normalizeUrl(fromIntent))
+        } else if (!saved.isNullOrBlank()) {
+            // The address was entered before and is kept, so there is nothing
+            // to ask for again: the player goes straight to the server.
+            setupAddress.setText(saved)
+            connect(normalizeUrl(saved))
         } else {
             // The address can be typed in from the start, and the search runs
             // at the same time: whichever finds a usable server first wins,
             // and the other stays available for the user to use.
-            setupAddress.setText(savedServerUrl() ?: "")
             setupAddress.requestFocus()
             // The keyboard is brought up, because the address is the one thing
             // the user may want to do here. A player on a television with a
@@ -193,7 +206,19 @@ class MainActivity : Activity() {
                 }
             }
         }
-        webView.webChromeClient = WebChromeClient()
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onShowCustomView(
+                view: View,
+                callback: CustomViewCallback
+            ) {
+                // A video that asks for the whole screen, such as the one the
+                // splash screen plays, is shown in the web view itself. The
+                // default handling takes the activity out of the picture,
+                // which on a television means the player is replaced by
+                // whatever the system puts in its place.
+                webView.visibility = View.VISIBLE
+            }
+        }
     }
 
     /**
@@ -270,6 +295,10 @@ class MainActivity : Activity() {
         setupStatus.text = message
         setupPanel.visibility = View.VISIBLE
         webView.visibility = View.GONE
+        // The way back to the player is only there when there is a player to
+        // go back to.
+        findViewById<Button>(R.id.setup_back_to_player).visibility =
+            if (serverUrl.isNullOrBlank()) View.GONE else View.VISIBLE
     }
 
     /** Hide the setup panel, so the player is the only thing on the screen. */
@@ -298,22 +327,67 @@ class MainActivity : Activity() {
     }
 
     /**
-     * A back press goes back inside the page.
+     * A back press asks whether to leave the app.
      *
-     * The player is the whole experience, so a press that would leave it
-     * brings up the address screen instead of closing the app: the address
-     * may need changing, and there is nowhere else to go.
+     * The player is the whole experience and the page has no history to go
+     * back to, so a press that would otherwise close the app asks first. A
+     * player on a television is often left running, and a stray press from a
+     * remote control should not end the song.
      */
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (keyCode == KeyEvent.KEYCODE_BACK) {
             if (webView.visibility == View.VISIBLE && webView.canGoBack()) {
                 webView.goBack()
             } else {
-                showSetup(getString(R.string.setup_change_address))
+                confirmExit()
             }
             return true
         }
         return super.onKeyDown(keyCode, event)
+    }
+
+    /**
+     * Ask whether the app should be closed.
+     *
+     * Confirming closes the app for good. Declining returns to the player,
+     * which is where a player belongs. Changing the address is offered here
+     * too, because the back button no longer leads to the address screen.
+     */
+    private fun confirmExit() {
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(R.string.exit_title)
+            .setMessage(R.string.exit_message)
+            .setNeutralButton(R.string.exit_change_address) { _, _ -> showAddressScreen() }
+            .setNegativeButton(R.string.exit_stay) { d, _ -> d.dismiss() }
+            .setPositiveButton(R.string.exit_confirm) { _, _ -> finish() }
+            .create()
+
+        dialog.setOnShowListener {
+            // The player is paused while the question is on screen, so the
+            // song does not play to nobody behind a dialog.
+            webView.onPause()
+        }
+        dialog.setOnDismissListener {
+            // The dialog may have closed the app, in which case the player
+            // must not be woken up again.
+            if (!isFinishing) {
+                webView.onResume()
+            }
+        }
+
+        dialog.show()
+    }
+
+    /**
+     * Open the address screen.
+     *
+     * The back button asks whether to leave, so the address screen is
+     * reached from the exit question instead.
+     */
+    private fun showAddressScreen() {
+        setupAddress.setText(serverUrl ?: savedServerUrl() ?: "")
+        setupAddress.requestFocus()
+        showSetup(getString(R.string.setup_change_address))
     }
 
     override fun onPause() {

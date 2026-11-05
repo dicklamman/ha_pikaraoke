@@ -79,6 +79,16 @@
                 android:layout_height="wrap_content"
                 android:layout_marginStart="12dp"
                 android:text="@string/setup_search" />
+
+            <!-- Returns to the player, for when the address screen was opened
+                 by mistake and the song is already playing. -->
+            <Button
+                android:id="@+id/setup_back_to_player"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:text="@string/setup_back_to_player"
+                android:visibility="gone" />
         </LinearLayout>
 
     </LinearLayout>

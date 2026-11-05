@@ -9,5 +9,11 @@
     <string name="setup_address_hint">192.168.0.10:5555</string>
     <string name="setup_connect">Connect</string>
     <string name="setup_search">Search again</string>
+    <string name="setup_back_to_player">Back to player</string>
     <string name="setup_could_not_connect">Could not reach that address. Check it and try again.</string>
+    <string name="exit_title">Close PiKaraoke?</string>
+    <string name="exit_message">The player will stop and the app will close.</string>
+    <string name="exit_stay">Keep playing</string>
+    <string name="exit_confirm">Close</string>
+    <string name="exit_change_address">Change address</string>
 </resources>

@@ -26,7 +26,7 @@
 
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|density"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|density|uiMode|fontScale|navigation|layoutDirection|colorMode"
             android:exported="true"
             android:launchMode="singleTask"
             android:screenOrientation="sensorLandscape">
