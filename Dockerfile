@@ -21,19 +21,32 @@ FROM alpine:3.24 AS source
 ARG UPSTREAM_REPO=https://github.com/vicwomg/pikaraoke.git
 ARG UPSTREAM_REF=master
 
+# The extension patch is copied in before the clone. The build caches each
+# step, so copying the patch first means a change to the patch invalidates the
+# clone as well. Otherwise the clone is reused from an earlier build and the
+# new patch is applied to an upstream tree that is no longer the one it was
+# written against, which fails in a way that looks like a broken patch.
+COPY extension/0001-ha-addon.patch /tmp/extension.patch
+
 # git: the upstream source is fetched from git during the build.
 RUN apk add --no-cache git
 
-# A shallow clone of one branch: the history is not needed to build, and the
-# whole point is to keep the build fast and the image small.
-RUN git clone --depth 1 --branch "${UPSTREAM_REF}" "${UPSTREAM_REPO}" /src \
-    && rm -rf /src/.git
+# The clone keeps its history, and it is not removed yet: the patch is applied
+# with a three-way merge below, and that merge needs the git history to find
+# the upstream file the patch was written against. When upstream changes the
+# lines the patch touches, the merge folds the change into the patched file
+# instead of refusing to apply it.
+RUN git clone --branch "${UPSTREAM_REF}" "${UPSTREAM_REPO}" /src
 
 # The patch is the extension: Ingress path handling, the lyrics sidecar and
 # the Home Assistant option plumbing. It is kept out of the upstream tree so
 # that updating upstream is a matter of re-applying one patch.
-COPY extension/0001-ha-addon.patch /tmp/extension.patch
-RUN cd /src && git apply --verbose /tmp/extension.patch && rm /tmp/extension.patch
+#
+# If the merge still conflicts, the build fails here, where the message says
+# which file disagrees, rather than later at runtime.
+RUN cd /src \
+    && git apply --3way --verbose /tmp/extension.patch \
+    && rm -rf /src/.git /tmp/extension.patch
 
 
 FROM alpine:3.24
