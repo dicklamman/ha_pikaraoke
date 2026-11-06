@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.23.4
+
+- Fix the Android player crashing, and the exit question flashing up and
+  down, when the back button of the remote is pressed while a song is
+  playing.
+  - The back key is now taken before the web view sees it. The web view
+    uses the back key to walk its own history, and the history of a player
+    that has fallen over is a trail of error pages, so a press of the
+    remote could replace the player with an error page in the middle of a
+    song.
+  - The question is raised on the way down of the key and the whole press
+    is swallowed afterwards, both halves. Showing the question gives the
+    question's own window the focus, so the release of the very press
+    that raised it arrives at the question. Answering that release made
+    the question appear and vanish in the same breath.
+  - Only one question may be on screen at a time. A remote that holds the
+    back key down sends a stream of repeats, and answering each of them
+    stacked a question on every repeat.
+  - The web view is not touched once it has been destroyed. Asking a
+    destroyed web view to pause, or to load a page, takes the app down
+    from the native side, where there is nothing to catch.
+- The back button asks whether to close the app while the splash is
+  playing, instead of closing it straight away, and one of the answers
+  opens the address field again.
+
 ## 1.23.3
 
 - Add a "Shuffle" button to the queue page, next to "Clear all". It

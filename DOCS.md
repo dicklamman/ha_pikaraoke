@@ -94,8 +94,13 @@ splash screen.
 The address can also be typed in at any time, which is useful when the search
 does not find the server, or when it finds one at an address that does not
 reach it. The field is on the first screen and is filled in with the address
-last used, so the app connects to it again on the next start. Pressing back
-while the splash is playing brings the field up again.
+last used, so the app connects to it again on the next start.
+
+Pressing back while the splash is playing asks whether the app should be
+closed, rather than closing it straight away: a player on a television is
+often left running, and a stray press of the remote should not end the
+song. The question can be answered with the arrow keys of the remote, and
+one of the answers opens the address field again.
 
 The address is in the form `192.168.0.10:5555` — the host's address on the
 local network and the port the add-on serves on. The port may be left out if

@@ -65,6 +65,44 @@ class MainActivity : Activity() {
      */
     private var fallbackUrl: String? = null
 
+    /**
+     * The question asked before closing the app, while it is on screen.
+     *
+     * Only one question may be on screen at a time. A remote that sends the
+     * back key repeatedly would otherwise stack a question on every press,
+     * each one dismissing the last, which looks like the app flashing and
+     * then falling over.
+     */
+    private var exitDialog: AlertDialog? = null
+
+    /**
+     * True while the app is being closed, so that a late callback cannot
+     * wake the player back up after it is on its way out.
+     */
+    private var closing = false
+
+    /**
+     * False once the web view has been destroyed.
+     *
+     * A destroyed web view must not be touched again. Asking one to load a
+     * page, or to pause, after it has been destroyed takes the app down
+     * with it, and the crash comes out of the native side of the web view
+     * rather than out of the app, so there is nothing to catch.
+     */
+    private var webViewAlive = true
+
+    /**
+     * True while the question is still waiting for the key that raised it to
+     * be released.
+     *
+     * Showing the question gives the question's window the focus, so the
+     * release of the very press that raised it arrives at the question
+     * rather than at the player. That release is the end of the press that
+     * asked the question, not a new press of the back key, and answering
+     * it would make the question appear and vanish in the same breath.
+     */
+    private var awaitingBackRelease = false
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -280,10 +318,16 @@ class MainActivity : Activity() {
                 // The panel stays up until the page actually arrives, because a
                 // load that starts and then fails would otherwise leave a
                 // blank screen with no way back.
+                if (!webViewAlive) {
+                    return
+                }
                 setupStatus.text = getString(R.string.setup_connecting)
             }
 
             override fun onPageFinished(view: WebView, url: String) {
+                if (!webViewAlive) {
+                    return
+                }
                 hideSetup()
             }
 
@@ -296,6 +340,11 @@ class MainActivity : Activity() {
                 // blocked font should not throw the player back to the setup
                 // screen while the splash is otherwise working.
                 if (!request.isForMainFrame) {
+                    return
+                }
+                // The web view may have been destroyed while the load was
+                // failing, and the setup panel may be gone with it.
+                if (!webViewAlive || closing || isFinishing) {
                     return
                 }
                 // The address the server gave may be one that cannot be reached
@@ -349,6 +398,11 @@ class MainActivity : Activity() {
             }
             mainHandler.post {
                 searching = false
+                // The app may have been closed while the search was out on
+                // the network, and there is nothing left to connect to.
+                if (closing || isFinishing || isDestroyed || !webViewAlive) {
+                    return@post
+                }
                 val server = servers.firstOrNull()
                 if (server != null) {
                     // The server was found. Its own address is tried first,
@@ -403,6 +457,12 @@ class MainActivity : Activity() {
      * cannot be reached leaves an address to fix rather than a blank screen.
      */
     private fun connect(url: String) {
+        // The app may be on its way out by the time a search comes back, and
+        // a web view that has been destroyed must not be asked to load a page.
+        if (closing || isFinishing || isDestroyed || !webViewAlive) {
+            return
+        }
+
         serverUrl = url
         // The address is settled, so the keyboard is not needed any more.
         hideKeyboard()
@@ -460,23 +520,62 @@ class MainActivity : Activity() {
     }
 
     /**
-     * A back press asks whether to leave the app.
+     * Every key event, before anything else in the app sees it.
      *
-     * The player is the whole experience and the page has no history to go
-     * back to, so a press that would otherwise close the app asks first. A
-     * player on a television is often left running, and a stray press from a
-     * remote control should not end the song.
+     * The back key is taken here rather than in [onKeyDown], because the
+     * web view is also interested in the back key: it uses it to walk its
+     * own history, and the history of a player that has fallen over is a
+     * trail of error pages. Letting the web view have the key meant that a
+     * press of the remote during a song could replace the player with an
+     * error page.
+     *
+     * The key is swallowed whole, both halves of the press, so that nothing
+     * else in the app has an opinion about it: not the web view, and not
+     * the platform, which would otherwise close the app behind the
+     * question.
      */
-    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_BACK) {
-            if (webView.visibility == View.VISIBLE && webView.canGoBack()) {
-                webView.goBack()
-            } else {
-                confirmExit()
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                handleBack()
             }
+            // The key is consumed either way. A remote that holds it down
+            // sends a stream of repeats, and answering each of them would
+            // stack a question on every repeat.
             return true
         }
-        return super.onKeyDown(keyCode, event)
+        return super.dispatchKeyEvent(event)
+    }
+
+    /**
+     * The back gesture, on the versions of Android that have one.
+     *
+     * The gesture has no key events, so it arrives here instead. It asks
+     * the same question as the back button, so that the two do not behave
+     * differently from one version of Android to the next.
+     */
+    @Deprecated("The platform still routes the back gesture to this method.")
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        handleBack()
+    }
+
+    /**
+     * The action of the back key.
+     *
+     * The player is a single page with no history of its own, so there is
+     * nowhere to go back to: the back key always asks the question. The web
+     * view's own history is deliberately not used, because going back in it
+     * would leave the player on a page that is no longer the splash screen,
+     * or on an error page, in the middle of a song.
+     */
+    private fun handleBack() {
+        // A question that is already on screen answers itself: the press that
+        // raised it must not raise another one.
+        if (exitDialog != null) {
+            return
+        }
+        confirmExit()
     }
 
     /**
@@ -492,25 +591,77 @@ class MainActivity : Activity() {
      * in front of the television with no way to answer.
      */
     private fun confirmExit() {
+        // The player is already on its way out, or a question is already on
+        // screen. Either way there is nothing to ask.
+        if (closing || isFinishing || exitDialog != null) {
+            return
+        }
+
         val dialog = AlertDialog.Builder(this)
             .setView(R.layout.dialog_exit)
+            // The question cannot be dismissed by touching outside it or by
+            // the system's back gesture: it has to be answered with one of
+            // its own buttons, so that a stray press of the remote cannot
+            // leave the app in a half-answered state.
+            .setCancelable(false)
             .create()
 
-        // The remote's back button answers the question the same way the
-        // player itself does: it does not close the app by accident.
+        // Kept so that a second press of the back key cannot raise another
+        // question on top of this one.
+        exitDialog = dialog
+
+        // The press that raised the question is still held down: the release
+        // of it will arrive at the question's own window, because showing
+        // the question gives that window the focus. The release ends the
+        // press that asked the question, and is not a new press of its own.
+        awaitingBackRelease = true
+
+        // The remote's back button does not answer the question, and above
+        // all it does not raise it a second time.
+        //
+        // The key is swallowed whole: both the down event and the up event.
+        // The up event of the very press that raised the question arrives
+        // here, because showing the question gives the question's window
+        // the focus. Answering it would make the question appear and vanish
+        // in the same breath, which is what the player used to do.
+        //
+        // Swallowing it also stops the platform's own handling: the dialog
+        // closes itself on the back key, and the activity closes itself on
+        // the back key, and neither of them was asked.
         dialog.setOnKeyListener { _, keyCode, event ->
-            if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
-                dialog.dismiss()
-                true
-            } else {
-                false
+            if (keyCode != KeyEvent.KEYCODE_BACK) {
+                return@setOnKeyListener false
+            }
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> {
+                    // A press that starts here is a new one: the press that
+                    // raised the question started in the player, not here.
+                    awaitingBackRelease = false
+                    true
+                }
+                KeyEvent.ACTION_UP -> {
+                    if (awaitingBackRelease) {
+                        // The release of the press that raised the question.
+                        // It ends that press, and is not a new one.
+                        awaitingBackRelease = false
+                    } else {
+                        // A new press of the back key takes the question away
+                        // and leaves the player running, which is what the
+                        // question's first answer says.
+                        dialog.dismiss()
+                    }
+                    true
+                }
+                else -> true
             }
         }
 
         dialog.setOnShowListener {
             // The player is paused while the question is on screen, so the
             // song does not play to nobody behind a dialog.
-            webView.onPause()
+            if (webViewAlive) {
+                webView.onPause()
+            }
 
             // The focus starts on the answer that keeps the player running,
             // so a stray press of the middle of the remote does nothing.
@@ -519,9 +670,14 @@ class MainActivity : Activity() {
             wireUpAnswerKeys(dialog)
         }
         dialog.setOnDismissListener {
+            // The question has gone, so the next press of the back key may
+            // raise another one.
+            exitDialog = null
+
             // The dialog may have closed the app, in which case the player
-            // must not be woken up again.
-            if (!isFinishing) {
+            // must not be woken up again. The web view may also have been
+            // destroyed already, in which case there is nothing to wake.
+            if (!closing && !isFinishing && !isDestroyed && webViewAlive) {
                 webView.onResume()
             }
         }
@@ -534,6 +690,9 @@ class MainActivity : Activity() {
             dialog.dismiss()
         }
         dialog.findViewById<Button>(R.id.exit_confirm)?.setOnClickListener {
+            // The app is on its way out, so the player is not woken up again
+            // when the question goes.
+            closing = true
             dialog.dismiss()
             finish()
         }
@@ -592,16 +751,38 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
-        webView.onPause()
+        // The web view is gone by the time the app is torn down, and asking a
+        // destroyed view to pause takes the app down with it.
+        if (!isDestroyed && webViewAlive) {
+            webView.onPause()
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        webView.onResume()
+        if (!isDestroyed && webViewAlive) {
+            webView.onResume()
+        }
     }
 
     override fun onDestroy() {
+        // The app is going away, so nothing may try to wake the player up
+        // again afterwards.
+        closing = true
+
+        // A question that is still on screen would be dismissed by the system
+        // anyway, and its dismissal would reach a web view that is about to be
+        // destroyed.
+        exitDialog?.dismiss()
+        exitDialog = null
+
         background.shutdownNow()
+
+        // The web view is destroyed here and never touched again. A web view
+        // that has been destroyed and is then asked to do anything at all
+        // takes the app down from the native side, where there is nothing to
+        // catch.
+        webViewAlive = false
         webView.destroy()
         super.onDestroy()
     }
