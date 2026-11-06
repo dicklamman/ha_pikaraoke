@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.23.5
+
+- Keep the "Up next:" announcement on the splash screen to a single line.
+  A long song title used to wrap onto a second line, which pushed the
+  announcement up over the video and hid part of the picture. The title
+  and the singer's name are now cut short with an ellipsis instead. The
+  title keeps the room it needs and the singer's name gives way first,
+  since the title is what tells the room what is coming.
+
 ## 1.23.4
 
 - Fix the Android player crashing, and the exit question flashing up and

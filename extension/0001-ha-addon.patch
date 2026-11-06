@@ -330,7 +330,7 @@ index 0000000..8bd5a58
 +        }
 +        return json.dumps(payload).encode("utf-8")
 diff --git a/pikaraoke/lib/download_manager.py b/pikaraoke/lib/download_manager.py
-index 5062df2..46546ea 100644
+index 3603c13..32c78bf 100644
 --- a/pikaraoke/lib/download_manager.py
 +++ b/pikaraoke/lib/download_manager.py
 @@ -13,6 +13,7 @@ from gevent import Greenlet, spawn
@@ -341,7 +341,7 @@ index 5062df2..46546ea 100644
  from pikaraoke.lib.preference_manager import PreferenceManager
  from pikaraoke.lib.queue_manager import QueueManager
  from pikaraoke.lib.song_manager import SongManager
-@@ -443,6 +444,23 @@ class DownloadManager:
+@@ -440,6 +441,23 @@ class DownloadManager:
          )
          return True
  
@@ -365,7 +365,7 @@ index 5062df2..46546ea 100644
      def _execute_download(self, request: dict) -> int:
          """Execute a video download, re-queueing it if it fails with attempts to spare.
  
-@@ -529,6 +547,7 @@ class DownloadManager:
+@@ -526,6 +544,7 @@ class DownloadManager:
                      logging.warning("No video ID available to find downloaded song")
  
              if song_path:
@@ -1044,10 +1044,10 @@ index 76986b6..83af9e3 100644
  msgid "Play Next"
  msgstr ""
 diff --git a/pikaraoke/routes/queue_api.py b/pikaraoke/routes/queue_api.py
-index e5831da..3daf22a 100644
+index 836de6b..0886a70 100644
 --- a/pikaraoke/routes/queue_api.py
 +++ b/pikaraoke/routes/queue_api.py
-@@ -90,6 +90,20 @@ def add_random(amount):
+@@ -86,6 +86,20 @@ def add_random(amount):
      return jsonify({"success": added, "message": message})
  
  
@@ -1081,10 +1081,10 @@ index d85a791..434296d 100644
              "low": k.low_score_phrases,
              "mid": k.mid_score_phrases,
 diff --git a/pikaraoke/static/js/splash.js b/pikaraoke/static/js/splash.js
-index 91b9ec9..9b83b06 100644
+index 9924827..0c78276 100644
 --- a/pikaraoke/static/js/splash.js
 +++ b/pikaraoke/static/js/splash.js
-@@ -403,11 +403,16 @@ const handleNowPlayingUpdate = (np) => {
+@@ -400,11 +400,16 @@ const handleNowPlayingUpdate = (np) => {
  
    const video = getVideoPlayer();
  
@@ -1103,7 +1103,7 @@ index 91b9ec9..9b83b06 100644
      $("#video-source").attr("src", "");
      video.load();
      $("#video-source").attr("src", streamUrl);
-@@ -478,6 +483,9 @@ const setupOverlayMenus = () => {
+@@ -475,6 +480,9 @@ const setupOverlayMenus = () => {
    if (PikaraokeConfig.hideOverlay) {
      $('#bottom-container').hide();
      $('#top-container').hide();
@@ -1113,7 +1113,7 @@ index 91b9ec9..9b83b06 100644
    }
    $("#menu a").fadeOut(); // start hidden
    const triggerInactivity = () => {
-@@ -624,6 +632,7 @@ const PREFERENCE_EFFECTS = {
+@@ -621,6 +629,7 @@ const PREFERENCE_EFFECTS = {
    hide_overlay:        (v) => {
      PikaraokeConfig.hideOverlay = v;
      $("#bottom-container, #top-container").toggle(!v);
@@ -1121,7 +1121,7 @@ index 91b9ec9..9b83b06 100644
    },
    hide_url:            (v) => { $(".splash-url").toggle(!v); },
    hide_qr_code:        (v) => { $(".splash-qr-image").toggle(!v); },
-@@ -780,14 +789,15 @@ const UI_SCALE_TARGETS = [
+@@ -777,14 +786,15 @@ const UI_SCALE_TARGETS = [
    // about its own centre and the two overlap.
    { selector: '#logo-container > div', origin: null },
    { selector: '#top-container', origin: 'top right' },
@@ -1179,10 +1179,10 @@ index 34f9134..79e237f 100644
          }
  
 diff --git a/pikaraoke/templates/queue.html b/pikaraoke/templates/queue.html
-index fa824e1..29a6df7 100644
+index 1a4d86d..0c9de05 100644
 --- a/pikaraoke/templates/queue.html
 +++ b/pikaraoke/templates/queue.html
-@@ -618,6 +618,8 @@
+@@ -615,6 +615,8 @@
  		<a class="add-random has-text-success" href="#"
  			><span class="icon is-medium mr-1"><i class="ph ph-plus-circle"></i></span></a>
  			{% trans %}Add <input id="randomNumberInput" class="input mx-2 p-2" pattern="\d*" maxlength="2" value="3" min="1" max="99" style="width: 42px" /> random songs{% endtrans %}
@@ -1210,7 +1210,7 @@ index 33a7801..ce4beef 100644
  					<label for="pref-browse-per-page">{# MSG: Label for the dropdown choosing how many songs are shown per page on the Songs page. #} {% trans %}Songs per page{% endtrans %}</label>
  					<div class="select is-flex-shrink-0 ml-4">
 diff --git a/pikaraoke/templates/splash.html b/pikaraoke/templates/splash.html
-index 235c55c..c5a6ac5 100644
+index 235c55c..e95dde2 100644
 --- a/pikaraoke/templates/splash.html
 +++ b/pikaraoke/templates/splash.html
 @@ -63,15 +63,6 @@
@@ -1229,7 +1229,7 @@ index 235c55c..c5a6ac5 100644
    <div id="qr-code">
      <img
        class="splash-qr-image"
-@@ -84,7 +75,15 @@
+@@ -84,22 +75,32 @@
        <div>&nbsp;{{ url }}</div>
      </div>
    </div>
@@ -1246,7 +1246,32 @@ index 235c55c..c5a6ac5 100644
    <div
      id="up-next"
      class="has-text-warning is-size-5 stroke has-text-right"
-@@ -237,23 +236,25 @@
+     style="display: none"
+   >
+-    <b class="has-text-white"
+-      >{# MSG: Label for the next song to be played in the queue. #} {% trans
+-      %}Up next:{% endtrans %}
+-    </b>
+-    <span id="up-next-song"></span>
+-    <div class="has-text-success">
++    <div class="up-next-title">
++      <b class="has-text-white"
++        >{# MSG: Label for the next song to be played in the queue. #} {% trans
++        %}Up next:{% endtrans %}
++      </b>
++      <span id="up-next-song"></span>
++    </div>
++    <div class="has-text-success up-next-singer">
+       <b class="has-text-white"
+         >{# MSG: Label for the next singer in the queue. #}
+-        {% trans %}Next singer:{% endtrans %} </b
+-      >&nbsp;<span class="icon is-text-size mr-1"><i class="ph ph-microphone-stage" title="Next singer"></i></span
++        {% trans %}Next singer:{% endtrans %}&nbsp;</b
++      ><span class="icon is-text-size mr-1 up-next-icon"><i class="ph ph-microphone-stage" title="Next singer"></i></span
+       ><span id="up-next-singer"></span>
+     </div>
+   </div>
+@@ -237,27 +238,70 @@
      max-width: 75%;
    }
    #ap-container {
@@ -1278,7 +1303,52 @@ index 235c55c..c5a6ac5 100644
    }
    #up-next {
      max-width: 75%;
-@@ -320,9 +321,11 @@
+   }
++  /* The song title and the singer's name each stay on a single line.
++     A long title is cut short with an ellipsis rather than wrapped, because
++     a second line pushes the announcement up over the video and hides part
++     of the picture. The title keeps the room it needs and the singer's name
++     gives way first, since the title is what tells the room what is
++     coming. */
++  .up-next-title,
++  .up-next-singer {
++    display: flex;
++    align-items: baseline;
++    justify-content: flex-end;
++    min-width: 0;
++    white-space: nowrap;
++  }
++  .up-next-title {
++    max-width: 100%;
++  }
++  .up-next-singer {
++    max-width: 100%;
++  }
++  /* The label is never cut: it is short, and a missing label would leave a
++     stray title on the screen with nothing to say what it is. */
++  .up-next-title b,
++  .up-next-singer b {
++    flex: 0 0 auto;
++  }
++  /* The microphone icon sits between the label and the name. It is small
++     and it is always there, so it is never cut either. */
++  .up-next-icon {
++    flex: 0 0 auto;
++  }
++  /* The text is the part that is cut. It is allowed to shrink, and to take
++     as little room as it needs, so that the line it is on always fits. */
++  #up-next-song,
++  #up-next-singer {
++    flex: 0 1 auto;
++    min-width: 0;
++    overflow: hidden;
++    text-overflow: ellipsis;
++    white-space: nowrap;
++  }
+   .video-container {
+     position: absolute;
+     z-index: 2;
+@@ -320,9 +364,11 @@
  	 height: 100vh;
    }
    #menu {
@@ -1291,7 +1361,7 @@ index 235c55c..c5a6ac5 100644
      left: 20px;
    }
    #clock {
-@@ -368,11 +371,12 @@
+@@ -368,11 +414,12 @@
    .timestamp {
      font-family: monospace;
    }
@@ -1778,7 +1848,7 @@ index 0000000..df303af
 +            raise AssertionError("expected the socket to time out")
 +        return issubclass(exc_type, socket.timeout)
 diff --git a/tests/unit/test_download_manager.py b/tests/unit/test_download_manager.py
-index 732b079..71673c7 100644
+index 7f6de94..b5694ff 100644
 --- a/tests/unit/test_download_manager.py
 +++ b/tests/unit/test_download_manager.py
 @@ -40,6 +40,18 @@ def no_reprioritize():
@@ -1818,8 +1888,8 @@ index 732b079..71673c7 100644
  
  
  @pytest.fixture
-@@ -184,9 +201,71 @@ class TestDownloadManagerQueueDownload:
-         assert download_manager.pending_downloads == []
+@@ -175,9 +192,71 @@ class TestDownloadManagerQueueDownload:
+         assert item["video_url"] == "https://youtube.com/watch?v=test123"
  
  
 +class TestFetchLyricsOnDownload:
@@ -2465,7 +2535,7 @@ index ee9a972..27740d4 100644
      """Test queue clearing."""
  
 diff --git a/tests/unit/test_queue_routes.py b/tests/unit/test_queue_routes.py
-index 8b2f41c..245dc3b 100644
+index 47c81bc..3f8a94f 100644
 --- a/tests/unit/test_queue_routes.py
 +++ b/tests/unit/test_queue_routes.py
 @@ -72,6 +72,28 @@ class TestQueueRoutes:
