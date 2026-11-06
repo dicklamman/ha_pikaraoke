@@ -829,6 +829,34 @@ index 536b9b5..c526bbd 100644
          "limit_user_songs_by": 0,
          "enable_fair_queue": False,
          "cdg_pixel_scaling": False,
+diff --git a/pikaraoke/lib/queue_manager.py b/pikaraoke/lib/queue_manager.py
+index e9d1b5d..2251aeb 100644
+--- a/pikaraoke/lib/queue_manager.py
++++ b/pikaraoke/lib/queue_manager.py
+@@ -247,6 +247,23 @@ class QueueManager:
+ 
+         return True
+ 
++    def queue_shuffle(self) -> bool:
++        """Shuffle the order of the songs waiting in the queue.
++
++        The song on screen is not in the queue, so it keeps playing; only the
++        order of the songs after it changes. Returns False when there is
++        nothing to shuffle, which is the queue holding fewer than two songs.
++        """
++        if len(self.queue) < 2:
++            logging.info("Nothing to shuffle: the queue holds fewer than two songs")
++            return False
++
++        random.shuffle(self.queue)
++        logging.info("Shuffled the queue")
++        self._events.emit("queue_update")
++        self._events.emit("now_playing_update")
++        return True
++
+     def queue_clear(self) -> None:
+         """Clear all songs from the queue and skip current song."""
+         # MSG: Message shown after the queue is cleared
 diff --git a/pikaraoke/lib/stream_manager.py b/pikaraoke/lib/stream_manager.py
 index c6175cd..fa1f724 100644
 --- a/pikaraoke/lib/stream_manager.py
@@ -994,6 +1022,52 @@ index 0a1c56c..1b0e7a4 100644
 -        environ["PATH_INFO"] = path_info or "/"
 -        environ["SCRIPT_NAME"] = f"{script_name}{self.base_path}"
          return self.app(environ, start_response)
+diff --git a/pikaraoke/messages.pot b/pikaraoke/messages.pot
+index 76986b6..83af9e3 100644
+--- a/pikaraoke/messages.pot
++++ b/pikaraoke/messages.pot
+@@ -1640,6 +1640,16 @@ msgstr ""
+ msgid "Clear all"
+ msgstr ""
+ 
++#. MSG: Label on the button that shuffles the order of the songs in the queue.
++#: templates/queue.html:622
++msgid "Shuffle"
++msgstr ""
++
++#. MSG: Message shown when there is nothing to shuffle in the queue
++#: routes/queue_api.py:103
++msgid "Nothing to shuffle!"
++msgstr ""
++
+ #: templates/queue.html:589
+ msgid "Play Next"
+ msgstr ""
+diff --git a/pikaraoke/routes/queue_api.py b/pikaraoke/routes/queue_api.py
+index e5831da..3daf22a 100644
+--- a/pikaraoke/routes/queue_api.py
++++ b/pikaraoke/routes/queue_api.py
+@@ -90,6 +90,20 @@ def add_random(amount):
+     return jsonify({"success": added, "message": message})
+ 
+ 
++@queue_api_bp.route("/api/queue/shuffle", methods=["POST"])
++def shuffle():
++    """Shuffle the songs waiting in the queue (admin only).
++
++    QueueManager emits queue_update and now_playing_update itself, and Karaoke
++    bridges those to the socket -- so this path adds no broadcast_event.
++    """
++    k = get_karaoke_instance()
++    success = k.queue_manager.queue_shuffle()
++    # MSG: Message shown when there is nothing to shuffle in the queue
++    message = "" if success else _("Nothing to shuffle!")
++    return jsonify({"success": success, "message": message})
++
++
+ @queue_api_bp.route("/api/queue/reorder", methods=["POST"])
+ @queue_api_bp.arguments(ReorderForm, location="form")
+ def reorder(form):
 diff --git a/pikaraoke/routes/settings.py b/pikaraoke/routes/settings.py
 index d85a791..434296d 100644
 --- a/pikaraoke/routes/settings.py
@@ -1065,6 +1139,58 @@ index 91b9ec9..9b83b06 100644
    { selector: '#clock', origin: 'top left' },
  ];
  
+diff --git a/pikaraoke/static/spa-navigation.js b/pikaraoke/static/spa-navigation.js
+index 34f9134..79e237f 100644
+--- a/pikaraoke/static/spa-navigation.js
++++ b/pikaraoke/static/spa-navigation.js
+@@ -301,6 +301,7 @@
+         $(document).off('click', '.confirm-clear');
+         $(document).off('click', '.confirm-delete-file');
+         $(document).off('click', '.add-random');
++        $(document).off('click', '.shuffle-queue');
+ 
+         // Clear queue confirmation
+         $(document).on('click', '.confirm-clear', function(e) {
+@@ -335,6 +336,16 @@
+                 if (!data.success) window.showNotification(data.message, 'is-warning');
+             });
+         });
++
++        // Shuffle the order of the songs waiting in the queue. The queue redraws
++        // itself off the queue_update the server emits, so nothing is fetched here.
++        $(document).on('click', '.shuffle-queue', function(e) {
++            e.preventDefault();
++            const url = `${window.pikaraokeConfig.basePath}/api/queue/shuffle`;
++            $.post(url, function (data) {
++                if (!data.success) window.showNotification(data.message, 'is-warning');
++            });
++        });
+     }
+ 
+     /**
+@@ -368,7 +379,8 @@
+             $link.hasClass('add-song-link') ||  // Browse page add to queue
+             $link.hasClass('confirm-clear') ||   // Clear queue button (has its own handler)
+             $link.hasClass('confirm-delete-file') ||  // Delete song file from library (has its own handler)
+-            $link.hasClass('add-random')) {      // Add random songs button (has its own handler)
++            $link.hasClass('add-random') ||       // Add random songs button (has its own handler)
++            $link.hasClass('shuffle-queue')) {    // Shuffle queue button (has its own handler)
+             return true;
+         }
+ 
+diff --git a/pikaraoke/templates/queue.html b/pikaraoke/templates/queue.html
+index fa824e1..29a6df7 100644
+--- a/pikaraoke/templates/queue.html
++++ b/pikaraoke/templates/queue.html
+@@ -618,6 +618,8 @@
+ 		<a class="add-random has-text-success" href="#"
+ 			><span class="icon is-medium mr-1"><i class="ph ph-plus-circle"></i></span></a>
+ 			{% trans %}Add <input id="randomNumberInput" class="input mx-2 p-2" pattern="\d*" maxlength="2" value="3" min="1" max="99" style="width: 42px" /> random songs{% endtrans %}
++		<a class="button is-info is-outlined shuffle-queue ml-3" href="#">
++		<span class="icon mr-1"><i class="ph ph-shuffle"></i></span>{% trans %}Shuffle{% endtrans %}</a>
+ 	</div>
+ 	<div>
+ 		<a class="button is-danger is-outlined confirm-clear" href="{{ request.script_root }}/api/queue/edit?action=clear">
 diff --git a/pikaraoke/templates/settings.html b/pikaraoke/templates/settings.html
 index 33a7801..ce4beef 100644
 --- a/pikaraoke/templates/settings.html
@@ -1181,6 +1307,321 @@ index 235c55c..c5a6ac5 100644
      z-index: 6;
      display: flex;
      flex-direction: column;
+diff --git a/pikaraoke/translations/de_DE/LC_MESSAGES/messages.po b/pikaraoke/translations/de_DE/LC_MESSAGES/messages.po
+index 6dff7d9..a7684fc 100644
+--- a/pikaraoke/translations/de_DE/LC_MESSAGES/messages.po
++++ b/pikaraoke/translations/de_DE/LC_MESSAGES/messages.po
+@@ -1905,6 +1905,16 @@ msgstr ""
+ msgid "Clear all"
+ msgstr "Alles löschen"
+ 
++#. MSG: Label on the button that shuffles the order of the songs in the queue.
++#: templates/queue.html:622
++msgid "Shuffle"
++msgstr "Mischen"
++
++#. MSG: Message shown when there is nothing to shuffle in the queue
++#: routes/queue_api.py:103
++msgid "Nothing to shuffle!"
++msgstr "Nichts zu mischen!"
++
+ # auto-translated
+ #: templates/queue.html:589
+ msgid "Play Next"
+diff --git a/pikaraoke/translations/es_VE/LC_MESSAGES/messages.po b/pikaraoke/translations/es_VE/LC_MESSAGES/messages.po
+index 8e63ddd..a042885 100644
+--- a/pikaraoke/translations/es_VE/LC_MESSAGES/messages.po
++++ b/pikaraoke/translations/es_VE/LC_MESSAGES/messages.po
+@@ -1898,6 +1898,16 @@ msgstr ""
+ msgid "Clear all"
+ msgstr "Borrar todo"
+ 
++#. MSG: Label on the button that shuffles the order of the songs in the queue.
++#: templates/queue.html:622
++msgid "Shuffle"
++msgstr "Mezclar"
++
++#. MSG: Message shown when there is nothing to shuffle in the queue
++#: routes/queue_api.py:103
++msgid "Nothing to shuffle!"
++msgstr "¡Nada que mezclar!"
++
+ # auto-translated
+ #: templates/queue.html:589
+ msgid "Play Next"
+diff --git a/pikaraoke/translations/fi_FI/LC_MESSAGES/messages.po b/pikaraoke/translations/fi_FI/LC_MESSAGES/messages.po
+index a5ea18c..f69339a 100644
+--- a/pikaraoke/translations/fi_FI/LC_MESSAGES/messages.po
++++ b/pikaraoke/translations/fi_FI/LC_MESSAGES/messages.po
+@@ -1972,6 +1972,16 @@ msgstr ""
+ msgid "Clear all"
+ msgstr "Tyhjennä kappalejono"
+ 
++#. MSG: Label on the button that shuffles the order of the songs in the queue.
++#: templates/queue.html:622
++msgid "Shuffle"
++msgstr "Sekoita"
++
++#. MSG: Message shown when there is nothing to shuffle in the queue
++#: routes/queue_api.py:103
++msgid "Nothing to shuffle!"
++msgstr "Ei mitään sekoitettavaa!"
++
+ # auto-translated
+ #: templates/queue.html:589
+ msgid "Play Next"
+diff --git a/pikaraoke/translations/fr_FR/LC_MESSAGES/messages.po b/pikaraoke/translations/fr_FR/LC_MESSAGES/messages.po
+index 5452c13..2dbd4c1 100644
+--- a/pikaraoke/translations/fr_FR/LC_MESSAGES/messages.po
++++ b/pikaraoke/translations/fr_FR/LC_MESSAGES/messages.po
+@@ -1912,6 +1912,16 @@ msgstr ""
+ msgid "Clear all"
+ msgstr "Tout effacer"
+ 
++#. MSG: Label on the button that shuffles the order of the songs in the queue.
++#: templates/queue.html:622
++msgid "Shuffle"
++msgstr "Mélanger"
++
++#. MSG: Message shown when there is nothing to shuffle in the queue
++#: routes/queue_api.py:103
++msgid "Nothing to shuffle!"
++msgstr "Rien à mélanger !"
++
+ # auto-translated
+ #: templates/queue.html:589
+ msgid "Play Next"
+diff --git a/pikaraoke/translations/id_ID/LC_MESSAGES/messages.po b/pikaraoke/translations/id_ID/LC_MESSAGES/messages.po
+index 9722286..de54c97 100644
+--- a/pikaraoke/translations/id_ID/LC_MESSAGES/messages.po
++++ b/pikaraoke/translations/id_ID/LC_MESSAGES/messages.po
+@@ -1848,6 +1848,16 @@ msgstr ""
+ msgid "Clear all"
+ msgstr "Hapus semua"
+ 
++#. MSG: Label on the button that shuffles the order of the songs in the queue.
++#: templates/queue.html:622
++msgid "Shuffle"
++msgstr "Acak"
++
++#. MSG: Message shown when there is nothing to shuffle in the queue
++#: routes/queue_api.py:103
++msgid "Nothing to shuffle!"
++msgstr "Tidak ada yang diacak!"
++
+ #: templates/queue.html:589
+ msgid "Play Next"
+ msgstr "Putar Selanjutnya"
+diff --git a/pikaraoke/translations/it_IT/LC_MESSAGES/messages.po b/pikaraoke/translations/it_IT/LC_MESSAGES/messages.po
+index 24d45fd..c9ce4dd 100644
+--- a/pikaraoke/translations/it_IT/LC_MESSAGES/messages.po
++++ b/pikaraoke/translations/it_IT/LC_MESSAGES/messages.po
+@@ -1904,6 +1904,16 @@ msgstr ""
+ msgid "Clear all"
+ msgstr "Elimina intera coda"
+ 
++#. MSG: Label on the button that shuffles the order of the songs in the queue.
++#: templates/queue.html:622
++msgid "Shuffle"
++msgstr "Mischia"
++
++#. MSG: Message shown when there is nothing to shuffle in the queue
++#: routes/queue_api.py:103
++msgid "Nothing to shuffle!"
++msgstr "Niente da mischiare!"
++
+ # auto-translated
+ #: templates/queue.html:589
+ msgid "Play Next"
+diff --git a/pikaraoke/translations/ja_JP/LC_MESSAGES/messages.po b/pikaraoke/translations/ja_JP/LC_MESSAGES/messages.po
+index 533ce71..5a187e4 100644
+--- a/pikaraoke/translations/ja_JP/LC_MESSAGES/messages.po
++++ b/pikaraoke/translations/ja_JP/LC_MESSAGES/messages.po
+@@ -1967,6 +1967,16 @@ msgstr ""
+ msgid "Clear all"
+ msgstr "すべてクリア"
+ 
++#. MSG: Label on the button that shuffles the order of the songs in the queue.
++#: templates/queue.html:622
++msgid "Shuffle"
++msgstr "シャッフル"
++
++#. MSG: Message shown when there is nothing to shuffle in the queue
++#: routes/queue_api.py:103
++msgid "Nothing to shuffle!"
++msgstr "シャッフルする曲がありません!"
++
+ # auto-translated
+ #: templates/queue.html:589
+ msgid "Play Next"
+diff --git a/pikaraoke/translations/ko_KR/LC_MESSAGES/messages.po b/pikaraoke/translations/ko_KR/LC_MESSAGES/messages.po
+index 52e1b84..fe5eb28 100644
+--- a/pikaraoke/translations/ko_KR/LC_MESSAGES/messages.po
++++ b/pikaraoke/translations/ko_KR/LC_MESSAGES/messages.po
+@@ -1967,6 +1967,16 @@ msgstr ""
+ msgid "Clear all"
+ msgstr "모두 지우기"
+ 
++#. MSG: Label on the button that shuffles the order of the songs in the queue.
++#: templates/queue.html:622
++msgid "Shuffle"
++msgstr "셔플"
++
++#. MSG: Message shown when there is nothing to shuffle in the queue
++#: routes/queue_api.py:103
++msgid "Nothing to shuffle!"
++msgstr "셔플할 곡이 없습니다!"
++
+ # auto-translated
+ #: templates/queue.html:589
+ msgid "Play Next"
+diff --git a/pikaraoke/translations/nb_NO/LC_MESSAGES/messages.po b/pikaraoke/translations/nb_NO/LC_MESSAGES/messages.po
+index 20dd0eb..86c920a 100644
+--- a/pikaraoke/translations/nb_NO/LC_MESSAGES/messages.po
++++ b/pikaraoke/translations/nb_NO/LC_MESSAGES/messages.po
+@@ -2016,6 +2016,16 @@ msgstr ""
+ msgid "Clear all"
+ msgstr "Fjern alle"
+ 
++#. MSG: Label on the button that shuffles the order of the songs in the queue.
++#: templates/queue.html:622
++msgid "Shuffle"
++msgstr "Stok"
++
++#. MSG: Message shown when there is nothing to shuffle in the queue
++#: routes/queue_api.py:103
++msgid "Nothing to shuffle!"
++msgstr "Ingenting å stokke!"
++
+ # auto-translated
+ #: templates/queue.html:589
+ msgid "Play Next"
+diff --git a/pikaraoke/translations/nl_NL/LC_MESSAGES/messages.po b/pikaraoke/translations/nl_NL/LC_MESSAGES/messages.po
+index e8b1aad..5f1544c 100644
+--- a/pikaraoke/translations/nl_NL/LC_MESSAGES/messages.po
++++ b/pikaraoke/translations/nl_NL/LC_MESSAGES/messages.po
+@@ -2035,6 +2035,16 @@ msgstr ""
+ msgid "Clear all"
+ msgstr "Alles wissen"
+ 
++#. MSG: Label on the button that shuffles the order of the songs in the queue.
++#: templates/queue.html:622
++msgid "Shuffle"
++msgstr "Schudden"
++
++#. MSG: Message shown when there is nothing to shuffle in the queue
++#: routes/queue_api.py:103
++msgid "Nothing to shuffle!"
++msgstr "Niets om te schudden!"
++
+ # auto-translated
+ #: templates/queue.html:589
+ msgid "Play Next"
+diff --git a/pikaraoke/translations/pt_BR/LC_MESSAGES/messages.po b/pikaraoke/translations/pt_BR/LC_MESSAGES/messages.po
+index dc6001d..cf34d02 100644
+--- a/pikaraoke/translations/pt_BR/LC_MESSAGES/messages.po
++++ b/pikaraoke/translations/pt_BR/LC_MESSAGES/messages.po
+@@ -1874,6 +1874,16 @@ msgstr ""
+ msgid "Clear all"
+ msgstr "Limpar todos"
+ 
++#. MSG: Label on the button that shuffles the order of the songs in the queue.
++#: templates/queue.html:622
++msgid "Shuffle"
++msgstr "Embaralhar"
++
++#. MSG: Message shown when there is nothing to shuffle in the queue
++#: routes/queue_api.py:103
++msgid "Nothing to shuffle!"
++msgstr "Nada para embaralhar!"
++
+ # auto-translated
+ #: templates/queue.html:589
+ msgid "Play Next"
+diff --git a/pikaraoke/translations/ru_RU/LC_MESSAGES/messages.po b/pikaraoke/translations/ru_RU/LC_MESSAGES/messages.po
+index ea553d2..9ba965a 100644
+--- a/pikaraoke/translations/ru_RU/LC_MESSAGES/messages.po
++++ b/pikaraoke/translations/ru_RU/LC_MESSAGES/messages.po
+@@ -1889,6 +1889,16 @@ msgstr ""
+ msgid "Clear all"
+ msgstr "Очистить все"
+ 
++#. MSG: Label on the button that shuffles the order of the songs in the queue.
++#: templates/queue.html:622
++msgid "Shuffle"
++msgstr "Перемешать"
++
++#. MSG: Message shown when there is nothing to shuffle in the queue
++#: routes/queue_api.py:103
++msgid "Nothing to shuffle!"
++msgstr "Нечего перемешивать!"
++
+ # auto-translated
+ #: templates/queue.html:589
+ msgid "Play Next"
+diff --git a/pikaraoke/translations/th_TH/LC_MESSAGES/messages.po b/pikaraoke/translations/th_TH/LC_MESSAGES/messages.po
+index b444bd7..22e59d0 100644
+--- a/pikaraoke/translations/th_TH/LC_MESSAGES/messages.po
++++ b/pikaraoke/translations/th_TH/LC_MESSAGES/messages.po
+@@ -2004,6 +2004,16 @@ msgstr ""
+ msgid "Clear all"
+ msgstr "เคลียร์ทั้งหมด"
+ 
++#. MSG: Label on the button that shuffles the order of the songs in the queue.
++#: templates/queue.html:622
++msgid "Shuffle"
++msgstr "สุ่มลำดับ"
++
++#. MSG: Message shown when there is nothing to shuffle in the queue
++#: routes/queue_api.py:103
++msgid "Nothing to shuffle!"
++msgstr "ไม่มีเพลงให้สุ่มลำดับ!"
++
+ # auto-translated
+ #: templates/queue.html:589
+ msgid "Play Next"
+diff --git a/pikaraoke/translations/zh_Hans_CN/LC_MESSAGES/messages.po b/pikaraoke/translations/zh_Hans_CN/LC_MESSAGES/messages.po
+index f474ff2..593ecde 100644
+--- a/pikaraoke/translations/zh_Hans_CN/LC_MESSAGES/messages.po
++++ b/pikaraoke/translations/zh_Hans_CN/LC_MESSAGES/messages.po
+@@ -1907,6 +1907,16 @@ msgstr ""
+ msgid "Clear all"
+ msgstr "清除所有"
+ 
++#. MSG: Label on the button that shuffles the order of the songs in the queue.
++#: templates/queue.html:622
++msgid "Shuffle"
++msgstr "随机播放顺序"
++
++#. MSG: Message shown when there is nothing to shuffle in the queue
++#: routes/queue_api.py:103
++msgid "Nothing to shuffle!"
++msgstr "没有可随机排序的歌曲！"
++
+ # auto-translated
+ #: templates/queue.html:589
+ msgid "Play Next"
+diff --git a/pikaraoke/translations/zh_Hant_TW/LC_MESSAGES/messages.po b/pikaraoke/translations/zh_Hant_TW/LC_MESSAGES/messages.po
+index 942c48a..78d53dc 100644
+--- a/pikaraoke/translations/zh_Hant_TW/LC_MESSAGES/messages.po
++++ b/pikaraoke/translations/zh_Hant_TW/LC_MESSAGES/messages.po
+@@ -1828,6 +1828,16 @@ msgstr ""
+ msgid "Clear all"
+ msgstr "清除全部"
+ 
++#. MSG: Label on the button that shuffles the order of the songs in the queue.
++#: templates/queue.html:622
++msgid "Shuffle"
++msgstr "隨機播放順序"
++
++#. MSG: Message shown when there is nothing to shuffle in the queue
++#: routes/queue_api.py:103
++msgid "Nothing to shuffle!"
++msgstr "沒有可隨機排序的歌曲！"
++
+ # auto-translated
+ #: templates/queue.html:589
+ msgid "Play Next"
 diff --git a/tests/conftest.py b/tests/conftest.py
 index 194ea24..62b1720 100644
 --- a/tests/conftest.py
@@ -1927,6 +2368,147 @@ index 98c30da..6495a3a 100644
          "limit_user_songs_by",
          "enable_fair_queue",
          "cdg_pixel_scaling",
+diff --git a/tests/unit/test_queue_manager.py b/tests/unit/test_queue_manager.py
+index ee9a972..27740d4 100644
+--- a/tests/unit/test_queue_manager.py
++++ b/tests/unit/test_queue_manager.py
+@@ -511,6 +511,91 @@ class TestQueueManagerSetSongSemitones:
+         assert queue_manager.set_song_semitones("/songs/absent---xyz.mp4", 2) is False
+ 
+ 
++class TestQueueManagerShuffle:
++    """Test shuffling the order of the queued songs."""
++
++    def test_shuffle_keeps_every_song(self, queue_manager):
++        """Shuffling reorders the queue without losing or adding a song."""
++        for index in range(1, 6):
++            queue_manager.enqueue(f"/songs/song{index}---abc.mp4", "User1")
++
++        result = queue_manager.queue_shuffle()
++
++        assert result is True
++        assert len(queue_manager.queue) == 5
++        assert sorted(item["file"] for item in queue_manager.queue) == [
++            f"/songs/song{index}---abc.mp4" for index in range(1, 6)
++        ]
++
++    def test_shuffle_changes_the_order(self, queue_manager):
++        """A queue of several songs does not come back in its original order.
++
++        The shuffle is random, so the chance of the original order surviving is
++        one in a factorial; the order is checked against a handful of shuffles
++        rather than a single one, which would flake.
++        """
++        for index in range(1, 7):
++            queue_manager.enqueue(f"/songs/song{index}---abc.mp4", "User1")
++        original = [item["file"] for item in queue_manager.queue]
++
++        orders = set()
++        for _ in range(20):
++            queue_manager.queue_shuffle()
++            orders.add(tuple(item["file"] for item in queue_manager.queue))
++
++        assert len(orders) > 1, "the shuffle never changed the order"
++        assert tuple(original) not in orders
++
++    def test_shuffle_keeps_the_song_details(self, queue_manager):
++        """A song keeps its singer and its key when the order changes."""
++        queue_manager.enqueue("/songs/song1---abc.mp4", "User1")
++        queue_manager.enqueue("/songs/song2---def.mp4", "User2", semitones=3)
++
++        queue_manager.queue_shuffle()
++
++        by_file = {item["file"]: item for item in queue_manager.queue}
++        assert by_file["/songs/song1---abc.mp4"]["user"] == "User1"
++        assert by_file["/songs/song2---def.mp4"]["user"] == "User2"
++        assert by_file["/songs/song2---def.mp4"]["semitones"] == 3
++
++    def test_shuffle_of_an_empty_queue_reports_failure(self, queue_manager):
++        """There is nothing to shuffle in an empty queue."""
++        assert queue_manager.queue_shuffle() is False
++
++    def test_shuffle_of_one_song_reports_failure(self, queue_manager):
++        """One song has no order to change."""
++        queue_manager.enqueue("/songs/song1---abc.mp4", "User1")
++
++        assert queue_manager.queue_shuffle() is False
++        assert len(queue_manager.queue) == 1
++
++    def test_shuffle_emits_events(self, queue_manager):
++        """A successful shuffle should emit queue_update and now_playing_update."""
++        queue_manager.enqueue("/songs/song1---abc.mp4", "User1")
++        queue_manager.enqueue("/songs/song2---def.mp4", "User2")
++
++        queue_updates = []
++        now_playing_updates = []
++        queue_manager._events.on("queue_update", lambda: queue_updates.append(True))
++        queue_manager._events.on("now_playing_update", lambda: now_playing_updates.append(True))
++
++        queue_manager.queue_shuffle()
++
++        assert len(queue_updates) == 1
++        assert len(now_playing_updates) == 1
++
++    def test_shuffle_of_one_song_emits_nothing(self, queue_manager):
++        """A shuffle that changed nothing should not redraw the queue."""
++        queue_manager.enqueue("/songs/song1---abc.mp4", "User1")
++
++        queue_updates = []
++        queue_manager._events.on("queue_update", lambda: queue_updates.append(True))
++
++        queue_manager.queue_shuffle()
++
++        assert queue_updates == []
++
++
+ class TestQueueManagerClear:
+     """Test queue clearing."""
+ 
+diff --git a/tests/unit/test_queue_routes.py b/tests/unit/test_queue_routes.py
+index 8b2f41c..245dc3b 100644
+--- a/tests/unit/test_queue_routes.py
++++ b/tests/unit/test_queue_routes.py
+@@ -72,6 +72,28 @@ class TestQueueRoutes:
+ 
+         assert response.get_json() == {"success": True, "message": ""}
+ 
++    @patch("pikaraoke.routes.queue_api.get_karaoke_instance")
++    def test_shuffle_says_when_there_is_nothing_to_shuffle(self, mock_get_instance, client):
++        """The only outcome the queue redrawing does not already show."""
++        mock_karaoke = MagicMock()
++        mock_karaoke.queue_manager.queue_shuffle.return_value = False
++        mock_get_instance.return_value = mock_karaoke
++
++        response = client.post("/api/queue/shuffle")
++
++        assert response.status_code == 200
++        assert response.get_json() == {"success": False, "message": "Nothing to shuffle!"}
++
++    @patch("pikaraoke.routes.queue_api.get_karaoke_instance")
++    def test_shuffle_stays_quiet_when_it_worked(self, mock_get_instance, client):
++        mock_karaoke = MagicMock()
++        mock_karaoke.queue_manager.queue_shuffle.return_value = True
++        mock_get_instance.return_value = mock_karaoke
++
++        response = client.post("/api/queue/shuffle")
++
++        assert response.get_json() == {"success": True, "message": ""}
++
+     @patch("pikaraoke.routes.queue_api.get_karaoke_instance")
+     def test_delete_download_error(self, mock_get_instance, client):
+         """Test the delete_download_error route."""
+diff --git a/tests/unit/test_state_changing_methods.py b/tests/unit/test_state_changing_methods.py
+index 5f6c642..db199c4 100644
+--- a/tests/unit/test_state_changing_methods.py
++++ b/tests/unit/test_state_changing_methods.py
+@@ -31,6 +31,7 @@ STATE_CHANGING_ENDPOINTS = {
+     "preferences.clear_preferences",
+     "files.delete_file",
+     "queue_api.add_random",
++    "queue_api.shuffle",
+     "queue_api.enqueue_form",
+     "queue_api.queue_edit",
+     "controller.skip",
 diff --git a/tests/unit/test_stream_manager.py b/tests/unit/test_stream_manager.py
 index 19de72a..b37a1a2 100644
 --- a/tests/unit/test_stream_manager.py

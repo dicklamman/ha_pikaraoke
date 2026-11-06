@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.23.3
+
+- Add a "Shuffle" button to the queue page, next to "Clear all". It
+  randomises the order of the songs waiting in the queue, leaving the song
+  that is playing untouched.
+- The button is admin-only, like the other queue controls, and says so when
+  there is nothing to shuffle.
+
 ## 1.23.2
 
 - Move the QR code and the address to the top-left corner of the splash
