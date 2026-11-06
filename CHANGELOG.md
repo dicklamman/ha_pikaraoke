@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.23.7
+
+- Keep the song library under a size limit.
+  - The library is a folder of downloaded videos, and a video is tens of
+    megabytes, so an evening of downloads fills a small disk.
+  - The add-on has a new **max_storage_mb** option. Set it to 500 and the
+    library is kept at 500 MB: whenever a download finishes and the library
+    has grown past the limit, the oldest songs are removed until it fits
+    again. Set it to 0 for no limit, which is the default.
+  - The setting is also on the Settings page, next to the other download
+    options, so it can be changed without editing the add-on's
+    configuration.
+  - The song that is playing is never removed, and neither is a song
+    waiting in the queue. A singer does not lose their turn because the
+    disk filled up.
+  - A song's lyrics and graphics are removed with it, so trimming the
+    library does not leave orphans behind.
+  - The limit is checked at startup as well, so lowering it takes effect
+    without waiting for the next download.
+
 ## 1.23.6
 
 - Keep the search results on the "Add New" page when another menu is opened

@@ -1,5 +1,5 @@
 diff --git a/pikaraoke/app.py b/pikaraoke/app.py
-index 896469e..5d3b829 100644
+index 896469e..9b23994 100644
 --- a/pikaraoke/app.py
 +++ b/pikaraoke/app.py
 @@ -17,6 +17,7 @@ from urllib.parse import quote, urlsplit
@@ -69,7 +69,15 @@ index 896469e..5d3b829 100644
          "singer_name_max_length": SINGER_NAME_MAX_LENGTH,
      }
  
-@@ -287,6 +313,17 @@ def main() -> None:
+@@ -276,6 +302,7 @@ def main() -> None:
+         config_file_path=args.config_file_path,
+         cdg_pixel_scaling=args.cdg_pixel_scaling,
+         enable_folder_browsing=args.enable_folder_browsing,
++        max_storage_mb=args.max_storage_mb,
+         streaming_format=args.streaming_format,
+         additional_ytdl_args=getattr(args, "ytdl_args", None),
+         socketio=socketio,
+@@ -287,6 +314,17 @@ def main() -> None:
      # reads a False as "flag not passed"), so persist the disable directly.
      if args.disable_autoplay:
          k.preferences.set("autoplay", False)
@@ -87,7 +95,7 @@ index 896469e..5d3b829 100644
  
      # expose karaoke object to the flask app
      with app.app_context():
-@@ -309,6 +346,10 @@ def main() -> None:
+@@ -309,6 +347,10 @@ def main() -> None:
      app.secret_key = admin_auth.secret_key
      app.config["ADMIN_AUTH"] = admin_auth
      app.config["LOGIN_THROTTLE"] = LoginThrottle()
@@ -99,7 +107,7 @@ index 896469e..5d3b829 100644
      # Passing the flag persists it; omitting it keeps the stored one, empty clears it.
      if args.admin_password is not None:
 diff --git a/pikaraoke/karaoke.py b/pikaraoke/karaoke.py
-index 7feb447..a20a24a 100644
+index 7feb447..783a3e3 100644
 --- a/pikaraoke/karaoke.py
 +++ b/pikaraoke/karaoke.py
 @@ -13,6 +13,7 @@ import qrcode
@@ -118,7 +126,15 @@ index 7feb447..a20a24a 100644
  from pikaraoke.lib.karaoke_database import KaraokeDatabase
  from pikaraoke.lib.keep_awake import KeepAwake
  from pikaraoke.lib.library_scanner import LibraryScanner, ScanResult
-@@ -73,6 +75,7 @@ class Karaoke:
+@@ -38,6 +40,7 @@ from pikaraoke.lib.queue_manager import PLACEHOLDER_SINGERS, QueueManager
+ from pikaraoke.lib.singer_manager import SingerManager, normalize_name
+ from pikaraoke.lib.song_manager import SongManager
+ from pikaraoke.lib.sound_manager import SoundManager
++from pikaraoke.lib.storage_manager import StorageManager
+ from pikaraoke.lib.url_prefix import append_base_path_to_url
+ from pikaraoke.lib.youtube_dl import get_youtubedl_version, upgrade_youtubedl
+ from pikaraoke.version import __version__ as VERSION
+@@ -73,6 +76,7 @@ class Karaoke:
      volume: float
  
      qr_code_path: str | None = None
@@ -126,7 +142,23 @@ index 7feb447..a20a24a 100644
      base_path: str = os.path.dirname(__file__)
      loop_interval: int = 500  # in milliseconds
      default_logo_path: str = os.path.join(base_path, "static", "images", "logo.png")
-@@ -253,6 +256,12 @@ class Karaoke:
+@@ -141,6 +145,7 @@ class Karaoke:
+         volume: float | None = None,
+         enable_title_tidy: bool | None = None,
+         enable_folder_browsing: bool | None = None,
++        max_storage_mb: int | None = None,
+     ) -> None:
+         """Initialize the Karaoke instance.
+ 
+@@ -185,6 +190,7 @@ class Karaoke:
+             socketio: SocketIO instance for real-time event emission.
+             preferred_language: Language code for UI (e.g., 'en', 'de_DE').
+             enable_folder_browsing: Offer a Folders view on the Songs page.
++            max_storage_mb: Ceiling on the song library in megabytes. 0 means no limit.
+         """
+         logging.basicConfig(
+             format="[%(asctime)s] %(levelname)s: %(message)s",
+@@ -253,6 +259,12 @@ class Karaoke:
  
          self.generate_qr_code()
  
@@ -139,7 +171,7 @@ index 7feb447..a20a24a 100644
          # Set preferred language from command line if provided (persists to config)
          if preferred_language:
              self.preferences.set("preferred_language", preferred_language)
-@@ -264,7 +273,6 @@ class Karaoke:
+@@ -264,7 +276,6 @@ class Karaoke:
              events=self.events,
              filename_from_path=self.song_manager.display_name_from_path,
              streaming_format=self.streaming_format,
@@ -147,7 +179,48 @@ index 7feb447..a20a24a 100644
          )
  
          # Event bridging: the coordinator wires manager events to the UI (SocketIO/notifications).
-@@ -454,6 +462,15 @@ class Karaoke:
+@@ -329,6 +340,19 @@ class Karaoke:
+             ),
+         )
+ 
++        # Keeps the song library under a size limit. The trim runs after a
++        # download completes, so the limit is reached before the next song is
++        # picked up rather than when the disk is already full.
++        self.storage_manager = StorageManager(
++            download_path=self.download_path,
++            song_manager=self.song_manager,
++            queue_manager=self.queue_manager,
++            get_now_playing=lambda: self.playback_controller.now_playing_filename,
++            get_max_bytes=lambda: (
++                self.max_storage_mb * 1024 * 1024 if self.max_storage_mb else 0
++            ),
++        )
++
+         # Initialize and start download manager
+         self.download_manager = DownloadManager(
+             events=self.events,
+@@ -338,6 +362,7 @@ class Karaoke:
+             download_path=self.download_path,
+             youtubedl_proxy=self.youtubedl_proxy,
+             additional_ytdl_args=self.additional_ytdl_args,
++            storage_manager=self.storage_manager,
+         )
+         self.download_manager.start()
+ 
+@@ -352,6 +377,12 @@ class Karaoke:
+             result = self._scanner.scan(self.download_path)
+             self._apply_scan_result(result)
+ 
++        # A library that was already over the limit when the add-on started is
++        # trimmed now, so lowering the limit takes effect without waiting for
++        # the next download. The scan above may still be running in the
++        # background, so this only trims what is on disk.
++        self.storage_manager.trim()
++
+     def _apply_scan_result(self, result: ScanResult) -> None:
+         """Update SongList and emit notifications after a scan."""
+         if result.added or result.moved or result.deleted:
+@@ -454,6 +485,15 @@ class Karaoke:
          else:
              self.ip = get_ip(self.platform)
  
@@ -163,7 +236,7 @@ index 7feb447..a20a24a 100644
          logging.debug("IP address (for QR code and splash screen): " + self.ip)
  
          if self.url_override != None:
-@@ -720,6 +737,7 @@ class Karaoke:
+@@ -720,6 +760,7 @@ class Karaoke:
          """Stop the karaoke run loop."""
          self.sound_manager.stop()
          self._keep_awake.stop()
@@ -172,13 +245,20 @@ index 7feb447..a20a24a 100644
  
      def handle_run_loop(self) -> None:
 diff --git a/pikaraoke/lib/args.py b/pikaraoke/lib/args.py
-index bd43d22..1f49ff9 100644
+index bd43d22..8b75db7 100644
 --- a/pikaraoke/lib/args.py
 +++ b/pikaraoke/lib/args.py
-@@ -185,6 +185,18 @@ def parse_pikaraoke_args() -> argparse.Namespace:
+@@ -185,6 +185,25 @@ def parse_pikaraoke_args() -> argparse.Namespace:
          help="Let users browse the song library by the folders it is stored in. Adds a Folders view to the Songs page when the library has subdirectories.",
          required=False,
      )
++    library.add_argument(
++        "--max-storage-mb",
++        type=int,
++        default=None,
++        help="Maximum size of the song library in megabytes. When the library grows past it, the oldest downloaded songs are removed after the next download. 0 means no limit.",
++        required=False,
++    )
 +    library.add_argument(
 +        "--fetch-lyrics",
 +        action="store_true",
@@ -194,7 +274,7 @@ index bd43d22..1f49ff9 100644
  
      splash = parser.add_argument_group("Splash screen")
      splash.add_argument(
-@@ -394,6 +406,12 @@ def parse_pikaraoke_args() -> argparse.Namespace:
+@@ -394,6 +413,12 @@ def parse_pikaraoke_args() -> argparse.Namespace:
          help="Wait for a manual start before each song instead of playing the next in the queue automatically. The upcoming song sits on the splash screen with a Play button until an admin starts it.",
          required=False,
      )
@@ -368,10 +448,10 @@ index 0000000..8bd5a58
 +        }
 +        return json.dumps(payload).encode("utf-8")
 diff --git a/pikaraoke/lib/download_manager.py b/pikaraoke/lib/download_manager.py
-index 3603c13..32c78bf 100644
+index 3603c13..e4ff693 100644
 --- a/pikaraoke/lib/download_manager.py
 +++ b/pikaraoke/lib/download_manager.py
-@@ -13,6 +13,7 @@ from gevent import Greenlet, spawn
+@@ -13,9 +13,11 @@ from gevent import Greenlet, spawn
  
  from pikaraoke.lib.events import EventSystem
  from pikaraoke.lib.get_platform import is_windows
@@ -379,7 +459,36 @@ index 3603c13..32c78bf 100644
  from pikaraoke.lib.preference_manager import PreferenceManager
  from pikaraoke.lib.queue_manager import QueueManager
  from pikaraoke.lib.song_manager import SongManager
-@@ -440,6 +441,23 @@ class DownloadManager:
++from pikaraoke.lib.storage_manager import StorageManager
+ from pikaraoke.lib.youtube_dl import (
+     PATH_PREFIX,
+     POSTPROCESS_PREFIX,
+@@ -130,6 +132,7 @@ class DownloadManager:
+         download_path: str,
+         youtubedl_proxy: str | None = None,
+         additional_ytdl_args: str | None = None,
++        storage_manager: StorageManager | None = None,
+     ) -> None:
+         """Initialize the download manager.
+ 
+@@ -141,6 +144,8 @@ class DownloadManager:
+             download_path: Directory where downloads are saved.
+             youtubedl_proxy: Optional proxy URL for yt-dlp.
+             additional_ytdl_args: Optional additional arguments for yt-dlp.
++            storage_manager: Optional manager that keeps the library under a
++                size limit, trimmed after each download.
+         """
+         self._events = events
+         self._preferences = preferences
+@@ -149,6 +154,7 @@ class DownloadManager:
+         self._download_path = download_path
+         self._youtubedl_proxy = youtubedl_proxy
+         self._additional_ytdl_args = additional_ytdl_args
++        self._storage_manager = storage_manager
+         self.download_queue: Queue = Queue()
+         self.pending_downloads: list[dict] = []  # Shadow queue for visibility
+         self.download_errors: list[dict] = []  # Track failed downloads
+@@ -440,6 +446,23 @@ class DownloadManager:
          )
          return True
  
@@ -403,7 +512,7 @@ index 3603c13..32c78bf 100644
      def _execute_download(self, request: dict) -> int:
          """Execute a video download, re-queueing it if it fails with attempts to spare.
  
-@@ -526,6 +544,7 @@ class DownloadManager:
+@@ -526,6 +549,7 @@ class DownloadManager:
                      logging.warning("No video ID available to find downloaded song")
  
              if song_path:
@@ -411,6 +520,28 @@ index 3603c13..32c78bf 100644
                  self._events.emit("song_downloaded", song_path, video_id)
              else:
                  logging.warning(
+@@ -541,4 +565,21 @@ class DownloadManager:
+                         "notification", _("Error queueing song: ") + displayed_title, "danger"
+                     )
+ 
++            # The trim runs last, so the song that was just downloaded and
++            # queued is already in the queue and is held back from removal.
++            self._trim_storage()
++
+         return rc
++
++    def _trim_storage(self) -> None:
++        """Bring the song library back under its size limit, if there is one.
++
++        A failure here must not take the download down with it: the song is
++        downloaded and playable either way.
++        """
++        if self._storage_manager is None:
++            return
++        try:
++            self._storage_manager.trim()
++        except OSError as e:
++            logging.warning("Could not trim the song library: %s", e)
 diff --git a/pikaraoke/lib/ha_network.py b/pikaraoke/lib/ha_network.py
 new file mode 100644
 index 0000000..4049ba3
@@ -856,14 +987,15 @@ index f3ce36c..0b5ac51 100644
      @property
      def ffmpeg_process(self) -> "subprocess.Popen | None":
 diff --git a/pikaraoke/lib/preference_manager.py b/pikaraoke/lib/preference_manager.py
-index 536b9b5..c526bbd 100644
+index 536b9b5..5b1deba 100644
 --- a/pikaraoke/lib/preference_manager.py
 +++ b/pikaraoke/lib/preference_manager.py
-@@ -39,6 +39,7 @@ class PreferenceManager:
+@@ -39,6 +39,8 @@ class PreferenceManager:
          "disable_bg_video": False,
          "disable_score": False,
          "autoplay": True,
 +        "fetch_lyrics": True,
++        "max_storage_mb": 0,
          "limit_user_songs_by": 0,
          "enable_fair_queue": False,
          "cdg_pixel_scaling": False,
@@ -897,7 +1029,7 @@ index e9d1b5d..2251aeb 100644
          # MSG: Message shown after the queue is cleared
 diff --git a/pikaraoke/lib/search_cache.py b/pikaraoke/lib/search_cache.py
 new file mode 100644
-index 0000000..bf245f4
+index 0000000..a12c199
 --- /dev/null
 +++ b/pikaraoke/lib/search_cache.py
 @@ -0,0 +1,80 @@
@@ -981,6 +1113,204 @@ index 0000000..bf245f4
 +        """Forget everything. Used when the library changes enough to matter."""
 +        with self._lock:
 +            self._entries.clear()
+diff --git a/pikaraoke/lib/storage_manager.py b/pikaraoke/lib/storage_manager.py
+new file mode 100644
+index 0000000..0295e6d
+--- /dev/null
++++ b/pikaraoke/lib/storage_manager.py
+@@ -0,0 +1,192 @@
++"""Keep the song library inside a configured size limit.
++
++The library is a directory of downloaded videos, and a video is tens of
++megabytes, so an evening of downloads fills a small disk. This module trims
++the library back to a ceiling: the oldest videos that are not playing and not
++waiting in the queue go first.
++
++The trim runs after a download completes, so the limit is reached by the time
++the next song is picked up rather than by the time the disk is full.
++"""
++
++from __future__ import annotations
++
++import logging
++import os
++import threading
++
++# The extensions the library holds. The scanner knows which of these are
++# playable, but it also knows about cover art and sidecars, which are not
++# counted as songs.
++_SONG_EXTENSIONS = (".mp4", ".mp3", ".zip", ".mkv", ".avi", ".webm", ".mov")
++
++# A file smaller than this is not a video and is not worth counting, so a
++# stray thumbnail or an empty placeholder cannot stand in for a song.
++_MIN_SONG_BYTES = 1024
++
++
++def _file_size(path: str) -> int:
++    """The size of a file in bytes, or 0 when it cannot be read."""
++    try:
++        return os.path.getsize(path)
++    except OSError:
++        return 0
++
++
++def _is_song_file(path: str) -> bool:
++    """True when the path is a library song rather than a sidecar or artwork."""
++    return os.path.splitext(path)[1].lower() in _SONG_EXTENSIONS
++
++
++class StorageManager:
++    """Trims the song library back to a size limit.
++
++    The limit is a ceiling on the bytes the song files take, not on the whole
++    directory: sidecars and artwork are removed along with the songs they
++    belong to, but they are not what pushes the library over the line.
++    """
++
++    def __init__(
++        self,
++        download_path: str,
++        song_manager,
++        queue_manager,
++        get_now_playing,
++        get_max_bytes=None,
++        max_bytes: int = 0,
++    ) -> None:
++        """Initialize the manager.
++
++        Args:
++            download_path: The library directory.
++            song_manager: The SongManager, used to delete songs from disk and
++                from the library index.
++            queue_manager: The QueueManager, used to skip songs that are
++                waiting to be played.
++            get_now_playing: Callable returning the path of the song that is
++                playing right now, or None.
++            get_max_bytes: Callable returning the ceiling in bytes. Read on
++                every trim, so changing the setting takes effect at once.
++            max_bytes: The ceiling in bytes, used when get_max_bytes is not
++                given. Zero or less means no limit.
++        """
++        self._download_path = download_path
++        self._song_manager = song_manager
++        self._queue_manager = queue_manager
++        self._get_now_playing = get_now_playing
++        self._get_max_bytes = get_max_bytes
++        self.max_bytes = max_bytes
++        # A download and a trim can overlap, and two trims can overlap when
++        # two downloads finish at once. The lock keeps them from removing the
++        # same song twice.
++        self._lock = threading.Lock()
++
++    @property
++    def limit_bytes(self) -> int:
++        """The configured ceiling in bytes."""
++        if self._get_max_bytes is not None:
++            return self._get_max_bytes()
++        return self.max_bytes
++
++    def library_size(self) -> int:
++        """The total size of the song files in the library, in bytes."""
++        return sum(size for _mtime, size, _path in self._song_files())
++
++    def _song_files(self) -> list[str]:
++        """Every song file in the library, with its size and modification time.
++
++        The songs are sorted oldest first, so the ones that have been in the
++        library the longest are the ones that go.
++        """
++        songs: list[tuple[float, int, str]] = []
++        for dirpath, _dirnames, filenames in os.walk(self._download_path):
++            for name in filenames:
++                path = os.path.join(dirpath, name)
++                if not _is_song_file(path):
++                    continue
++                size = _file_size(path)
++                if size < _MIN_SONG_BYTES:
++                    continue
++                try:
++                    mtime = os.path.getmtime(path)
++                except OSError:
++                    mtime = 0.0
++                songs.append((mtime, size, path))
++        songs.sort(key=lambda item: (item[0], item[2]))
++        return songs
++
++    def _protected_paths(self) -> set[str]:
++        """The songs that must not be removed.
++
++        The song that is playing is held, and so is everything waiting in the
++        queue: removing a queued song would take away a turn somebody has.
++        """
++        protected: set[str] = set()
++        now_playing = self._get_now_playing() if self._get_now_playing else None
++        if now_playing:
++            protected.add(now_playing)
++        if self._queue_manager is not None:
++            for item in self._queue_manager.queue:
++                path = item.get("file")
++                if path:
++                    protected.add(path)
++        return protected
++
++    def trim(self) -> list[str]:
++        """Remove the oldest songs until the library fits under the limit.
++
++        Returns the paths that were removed. Nothing is removed when there is
++        no limit, or when the library is already small enough.
++        """
++        limit = self.limit_bytes
++        if limit <= 0:
++            return []
++
++        with self._lock:
++            songs = self._song_files()
++            total = sum(size for _mtime, size, _path in songs)
++            if total <= limit:
++                return []
++
++            protected = self._protected_paths()
++            removed: list[str] = []
++            for _mtime, size, path in songs:
++                if total <= limit:
++                    break
++                if path in protected:
++                    continue
++                if not self._remove(path):
++                    continue
++                total -= size
++                removed.append(path)
++
++            if removed:
++                logging.info(
++                    "Storage limit: removed %d song(s) to fit %d bytes, library now %d bytes",
++                    len(removed),
++                    limit,
++                    total,
++                )
++            elif total > limit:
++                # Everything left is playing or queued, so the library cannot
++                # be brought under the limit right now.
++                logging.warning(
++                    "Storage limit: library is %d bytes, over the %d byte limit, "
++                    "but every remaining song is playing or queued",
++                    total,
++                    limit,
++                )
++            return removed
++
++    def _remove(self, song_path: str) -> bool:
++        """Remove a song and its sidecars from disk and from the library.
++
++        SongManager.delete() removes the song's sidecars with it, so the
++        lyrics and graphics of a trimmed song do not stay behind as orphans.
++        """
++        try:
++            self._song_manager.delete(song_path)
++        except (OSError, PermissionError) as e:
++            logging.warning("Could not remove %s for the storage limit: %s", song_path, e)
++            return False
++        return True
 diff --git a/pikaraoke/lib/stream_manager.py b/pikaraoke/lib/stream_manager.py
 index c6175cd..fa1f724 100644
 --- a/pikaraoke/lib/stream_manager.py
@@ -1147,10 +1477,29 @@ index 0a1c56c..1b0e7a4 100644
 -        environ["SCRIPT_NAME"] = f"{script_name}{self.base_path}"
          return self.app(environ, start_response)
 diff --git a/pikaraoke/messages.pot b/pikaraoke/messages.pot
-index 76986b6..83af9e3 100644
+index 76986b6..521eb2e 100644
 --- a/pikaraoke/messages.pot
 +++ b/pikaraoke/messages.pot
-@@ -1640,6 +1640,16 @@ msgstr ""
+@@ -1273,6 +1273,18 @@ msgid ""
+ "library has subfolders)"
+ msgstr ""
+ 
++#. MSG: Label for the setting that caps how much disk the song library may use.
++#: templates/settings.html:625
++msgid "Maximum song library size (MB)"
++msgstr ""
++
++#. MSG: Explanation under the song library size setting.
++#: templates/settings.html:626
++msgid ""
++"When the library grows past this, the oldest downloaded songs are removed "
++"after the next download. 0 means no limit."
++msgstr ""
++
+ #. Numberbox label for audio video synchronization
+ #: templates/info.html:687
+ msgid ""
+@@ -1640,6 +1652,16 @@ msgstr ""
  msgid "Clear all"
  msgstr ""
  
@@ -1307,14 +1656,15 @@ index e2eea88..4f1cb61 100644
 +        non_karaoke=non_karaoke if search_string else cookie_non_karaoke,
      )
 diff --git a/pikaraoke/routes/settings.py b/pikaraoke/routes/settings.py
-index d85a791..434296d 100644
+index d85a791..a4d7839 100644
 --- a/pikaraoke/routes/settings.py
 +++ b/pikaraoke/routes/settings.py
-@@ -70,6 +70,7 @@ def settings():
+@@ -70,6 +70,8 @@ def settings():
          per_page_options=per_page_options(k.browse_results_per_page),
          enable_title_tidy=k.enable_title_tidy,
          enable_folder_browsing=k.enable_folder_browsing,
 +        fetch_lyrics=k.fetch_lyrics,
++        max_storage_mb=k.max_storage_mb,
          score_phrases={
              "low": k.low_score_phrases,
              "mid": k.mid_score_phrases,
@@ -1490,10 +1840,10 @@ index 5f6d8d9..c1590df 100644
  				<a id="show-advanced" aria-expanded="false">{% trans %}Advanced{% endtrans %}</a>
  			</span>
 diff --git a/pikaraoke/templates/settings.html b/pikaraoke/templates/settings.html
-index 33a7801..ce4beef 100644
+index 33a7801..97c7f3c 100644
 --- a/pikaraoke/templates/settings.html
 +++ b/pikaraoke/templates/settings.html
-@@ -613,6 +613,13 @@
+@@ -613,6 +613,20 @@
  					</span>
  					<input id="pref-enable-folder-browsing" type="checkbox" class="user-preference-checkbox switch ml-4 mr-0" data-pref="enable_folder_browsing" {% if enable_folder_browsing == True %}checked{% endif %}>
  				</label>
@@ -1504,6 +1854,13 @@ index 33a7801..ce4beef 100644
 +					</span>
 +					<input id="pref-fetch-lyrics" type="checkbox" class="user-preference-checkbox switch ml-4 mr-0" data-pref="fetch_lyrics" {% if fetch_lyrics == True %}checked{% endif %}>
 +				</label>
++				<div class="panel-block px-5 py-3 is-justify-content-space-between">
++					<label for="pref-max-storage-mb">
++						{# MSG: Label for the setting that caps how much disk the song library may use. #} {% trans %}Maximum song library size (MB){% endtrans %}
++						<span class="is-block is-size-7 has-text-grey-light">{% trans %}When the library grows past this, the oldest downloaded songs are removed after the next download. 0 means no limit.{% endtrans %}</span>
++					</label>
++					<input id="pref-max-storage-mb" class="user-preference-input input is-flex-shrink-0 ml-4" type="number" min="0" max="1048576" step="50" data-pref="max_storage_mb" data-start-value="{{ max_storage_mb }}" value="{{ max_storage_mb }}" />
++				</div>
  				<div class="panel-block px-5 py-3 is-justify-content-space-between">
  					<label for="pref-browse-per-page">{# MSG: Label for the dropdown choosing how many songs are shown per page on the Songs page. #} {% trans %}Songs per page{% endtrans %}</label>
  					<div class="select is-flex-shrink-0 ml-4">
@@ -2164,7 +2521,7 @@ index 0000000..df303af
 +            raise AssertionError("expected the socket to time out")
 +        return issubclass(exc_type, socket.timeout)
 diff --git a/tests/unit/test_download_manager.py b/tests/unit/test_download_manager.py
-index 7f6de94..b5694ff 100644
+index 7f6de94..c09c810 100644
 --- a/tests/unit/test_download_manager.py
 +++ b/tests/unit/test_download_manager.py
 @@ -40,6 +40,18 @@ def no_reprioritize():
@@ -2277,6 +2634,106 @@ index 7f6de94..b5694ff 100644
      @patch("flask_babel._", side_effect=lambda x: x)
      @patch("subprocess.Popen")
      @patch("pikaraoke.lib.download_manager.build_ytdl_download_command")
+@@ -867,3 +946,99 @@ class TestDownloadManagerSpecialCharacters:
+         )
+ 
+         queue_manager.enqueue.assert_called_once_with(file_path, "TestUser", log_action=False)
++
++
++class TestDownloadManagerStorageLimit:
++    """Tests for trimming the library after a download."""
++
++    @pytest.fixture
++    def storage_manager(self):
++        """A mock StorageManager that records the trims."""
++        mock = MagicMock()
++        mock.trim.return_value = []
++        return mock
++
++    @pytest.fixture
++    def manager_with_storage(self, events, preferences, song_manager, queue_manager, storage_manager):
++        """A DownloadManager wired to a storage manager."""
++        return DownloadManager(
++            events=events,
++            preferences=preferences,
++            song_manager=song_manager,
++            queue_manager=queue_manager,
++            download_path="/songs",
++            youtubedl_proxy=None,
++            additional_ytdl_args=None,
++            storage_manager=storage_manager,
++        )
++
++    @patch("flask_babel._", side_effect=lambda x: x)
++    @patch("subprocess.Popen")
++    @patch("pikaraoke.lib.download_manager.build_ytdl_download_command")
++    def test_a_finished_download_trims_the_library(
++        self,
++        mock_build_cmd,
++        mock_popen,
++        mock_gettext,
++        manager_with_storage,
++        song_manager,
++        storage_manager,
++    ):
++        """The library is trimmed once the download has completed."""
++        mock_build_cmd.return_value = ["yt-dlp", "-o", "/songs/", "url"]
++        mock_process = MagicMock()
++        mock_process.stdout.readline.side_effect = ["Starting download...", ""]
++        mock_process.poll.return_value = 0
++        mock_popen.return_value = mock_process
++        song_manager.songs.find_by_id.return_value = "/songs/Song---dQw4w9WgXcQ.mp4"
++
++        manager_with_storage._execute_download(make_request())
++
++        storage_manager.trim.assert_called_once()
++
++    @patch("flask_babel._", side_effect=lambda x: x)
++    @patch("subprocess.Popen")
++    @patch("pikaraoke.lib.download_manager.build_ytdl_download_command")
++    def test_a_failed_download_leaves_the_library_alone(
++        self,
++        mock_build_cmd,
++        mock_popen,
++        mock_gettext,
++        manager_with_storage,
++        storage_manager,
++    ):
++        """A download that failed leaves nothing to trim."""
++        mock_build_cmd.return_value = ["yt-dlp", "url"]
++        mock_process = MagicMock()
++        mock_process.stdout.readline.side_effect = ["ERROR: nope", ""]
++        mock_process.poll.return_value = 1
++        mock_popen.return_value = mock_process
++
++        manager_with_storage._execute_download(make_request())
++
++        storage_manager.trim.assert_not_called()
++
++    @patch("flask_babel._", side_effect=lambda x: x)
++    @patch("subprocess.Popen")
++    @patch("pikaraoke.lib.download_manager.build_ytdl_download_command")
++    def test_a_trim_failure_does_not_fail_the_download(
++        self,
++        mock_build_cmd,
++        mock_popen,
++        mock_gettext,
++        manager_with_storage,
++        song_manager,
++        storage_manager,
++    ):
++        """A trim that fails does not take the download down with it."""
++        mock_build_cmd.return_value = ["yt-dlp", "-o", "/songs/", "url"]
++        mock_process = MagicMock()
++        mock_process.stdout.readline.side_effect = ["Starting download...", ""]
++        mock_process.poll.return_value = 0
++        mock_popen.return_value = mock_process
++        song_manager.songs.find_by_id.return_value = "/songs/Song---dQw4w9WgXcQ.mp4"
++        storage_manager.trim.side_effect = OSError("disk went away")
++
++        rc = manager_with_storage._execute_download(make_request())
++
++        assert rc == 0
 diff --git a/tests/unit/test_ha_network.py b/tests/unit/test_ha_network.py
 new file mode 100644
 index 0000000..bf0ca66
@@ -2743,14 +3200,15 @@ index 0000000..490d9ba
 +        assert result is None
 +        assert len(calls) == MAX_TRACK_ATTEMPTS
 diff --git a/tests/unit/test_preference_manager.py b/tests/unit/test_preference_manager.py
-index 98c30da..6495a3a 100644
+index 98c30da..f7400c1 100644
 --- a/tests/unit/test_preference_manager.py
 +++ b/tests/unit/test_preference_manager.py
-@@ -278,6 +278,7 @@ def test_preference_manager_defaults_exist():
+@@ -278,6 +278,8 @@ def test_preference_manager_defaults_exist():
          "disable_bg_video",
          "disable_score",
          "autoplay",
 +        "fetch_lyrics",
++        "max_storage_mb",
          "limit_user_songs_by",
          "enable_fair_queue",
          "cdg_pixel_scaling",
@@ -3069,6 +3527,109 @@ index b76f2a9..d7847f9 100644
  class TestDownloadRequiresName:
      """A download must carry a name, the same invariant as the queue add: the
      song is attributed the moment it is requested."""
+diff --git a/tests/unit/test_settings_routes.py b/tests/unit/test_settings_routes.py
+new file mode 100644
+index 0000000..6e76a2c
+--- /dev/null
++++ b/tests/unit/test_settings_routes.py
+@@ -0,0 +1,97 @@
++"""Unit tests for the settings route."""
++
++from unittest.mock import MagicMock, patch
++
++import pytest
++
++from pikaraoke.routes.settings import settings_bp
++
++from tests.conftest import make_route_app
++
++
++@pytest.fixture
++def app():
++    """A Flask app wired enough to render the settings page."""
++    # The settings page posts its changes and reads the library stats, and
++    # links to the admin controls; none of those are in this blueprint.
++    test_app = make_route_app(
++        settings_bp,
++        [
++            ("/api/change_preferences", "preferences.change_preferences"),
++            ("/api/clear_preferences", "preferences.clear_preferences"),
++            ("/api/library/stats", "library.library_stats"),
++            ("/api/library/sync", "library.sync_library"),
++            ("/admin/auth", "admin.auth"),
++            ("/admin/shutdown", "admin.shutdown"),
++            ("/admin/reboot", "admin.reboot"),
++            ("/admin/quit", "admin.quit"),
++            ("/admin/set_admin_password", "admin.set_admin_password"),
++            ("/admin/update_ytdl", "admin.update_ytdl"),
++            ("/admin/expand_fs", "admin.expand_fs"),
++            ("/admin/logout", "admin.logout"),
++            ("/api/sessions/reset", "sessions_api.reset_history"),
++        ],
++    )
++    test_app.config["SITE_NAME"] = "PiKaraoke"
++    return test_app
++
++
++@pytest.fixture
++def client(app):
++    """A test client."""
++    return app.test_client()
++
++
++def make_karaoke(max_storage_mb=500):
++    """A Karaoke instance stub with the settings the page reads."""
++    k = MagicMock()
++    k.max_storage_mb = max_storage_mb
++    k.fetch_lyrics = True
++    k.high_quality = False
++    k.enable_folder_browsing = False
++    k.limit_user_songs_by = 0
++    k.browse_results_per_page = 100
++    k.screensaver_timeout = 300
++    k.splash_scale = 1.0
++    k.bg_music_volume = 30
++    k.volume = 85
++    k.splash_delay = 2
++    k.buffer_size = 150
++    k.avsync = 0
++    k.is_raspberry_pi = False
++    k.youtubedl_version = "2026.07.04"
++    k.ffmpeg_version = "7.0"
++    k.is_transpose_enabled = True
++    k.low_score_phrases = ""
++    k.mid_score_phrases = ""
++    k.high_score_phrases = ""
++    k.sound_manager.available = False
++    k.preferences.get.return_value = "en"
++    k.preferences.get_or_default.return_value = "US"
++    return k
++
++
++@patch("pikaraoke.routes.settings.get_karaoke_instance")
++def test_the_settings_page_shows_the_storage_limit(mock_get_instance, client):
++    """The limit is visible on the settings page, with its current value."""
++    mock_get_instance.return_value = make_karaoke(max_storage_mb=750)
++
++    response = client.get("/settings")
++
++    assert response.status_code == 200
++    html = response.data.decode("utf-8")
++    assert 'data-pref="max_storage_mb"' in html
++    assert 'value="750"' in html
++
++
++@patch("pikaraoke.routes.settings.get_karaoke_instance")
++def test_a_limit_of_zero_is_shown(mock_get_instance, client):
++    """No limit is shown as zero rather than left blank."""
++    mock_get_instance.return_value = make_karaoke(max_storage_mb=0)
++
++    response = client.get("/settings")
++
++    assert response.status_code == 200
++    html = response.data.decode("utf-8")
++    assert 'data-pref="max_storage_mb"' in html
++    assert 'value="0"' in html
 diff --git a/tests/unit/test_state_changing_methods.py b/tests/unit/test_state_changing_methods.py
 index 5f6c642..db199c4 100644
 --- a/tests/unit/test_state_changing_methods.py
@@ -3081,6 +3642,228 @@ index 5f6c642..db199c4 100644
      "queue_api.enqueue_form",
      "queue_api.queue_edit",
      "controller.skip",
+diff --git a/tests/unit/test_storage_manager.py b/tests/unit/test_storage_manager.py
+new file mode 100644
+index 0000000..32adbdb
+--- /dev/null
++++ b/tests/unit/test_storage_manager.py
+@@ -0,0 +1,216 @@
++"""Unit tests for the storage_manager module."""
++
++import os
++
++import pytest
++
++from pikaraoke.lib.storage_manager import StorageManager
++
++
++def make_song(directory: str, name: str, size: int, mtime: float = 0.0) -> str:
++    """Write a fake song of a given size and return its path."""
++    path = os.path.join(directory, name)
++    with open(path, "wb") as f:
++        f.write(b"\0" * size)
++    os.utime(path, (mtime, mtime))
++    return path
++
++
++class FakeQueueManager:
++    """A queue manager that holds a fixed list of songs."""
++
++    def __init__(self, paths=None):
++        self.queue = [{"file": p} for p in (paths or [])]
++
++
++class FakeSongManager:
++    """A song manager that records what it was asked to delete."""
++
++    def __init__(self):
++        self.deleted = []
++
++    def delete(self, song_path: str) -> None:
++        self.deleted.append(song_path)
++        os.remove(song_path)
++
++
++@pytest.fixture
++def library(tmp_path):
++    """An empty library directory."""
++    path = tmp_path / "songs"
++    path.mkdir()
++    return str(path)
++
++
++def test_no_limit_removes_nothing(library):
++    """A library with no limit keeps every song."""
++    song_manager = FakeSongManager()
++    make_song(library, "a.mp4", 5000)
++    make_song(library, "b.mp4", 5000)
++
++    manager = StorageManager(
++        download_path=library,
++        song_manager=song_manager,
++        queue_manager=FakeQueueManager(),
++        get_now_playing=lambda: None,
++        max_bytes=0,
++    )
++
++    assert manager.trim() == []
++    assert song_manager.deleted == []
++
++
++def test_under_the_limit_removes_nothing(library):
++    """A library that fits under the limit is left alone."""
++    song_manager = FakeSongManager()
++    make_song(library, "a.mp4", 5000)
++
++    manager = StorageManager(
++        download_path=library,
++        song_manager=song_manager,
++        queue_manager=FakeQueueManager(),
++        get_now_playing=lambda: None,
++        max_bytes=10000,
++    )
++
++    assert manager.trim() == []
++    assert song_manager.deleted == []
++
++
++def test_over_the_limit_removes_the_oldest_first(library):
++    """The oldest song goes first when the library is too big."""
++    song_manager = FakeSongManager()
++    oldest = make_song(library, "old.mp4", 5000, mtime=100)
++    newest = make_song(library, "new.mp4", 5000, mtime=200)
++
++    manager = StorageManager(
++        download_path=library,
++        song_manager=song_manager,
++        queue_manager=FakeQueueManager(),
++        get_now_playing=lambda: None,
++        max_bytes=6000,
++    )
++
++    removed = manager.trim()
++
++    assert removed == [oldest]
++    assert song_manager.deleted == [oldest]
++    assert os.path.exists(newest)
++
++
++def test_removes_enough_to_get_under_the_limit(library):
++    """Songs go until the library fits, not just one of them."""
++    song_manager = FakeSongManager()
++    make_song(library, "a.mp4", 5000, mtime=100)
++    make_song(library, "b.mp4", 5000, mtime=200)
++    make_song(library, "c.mp4", 5000, mtime=300)
++
++    manager = StorageManager(
++        download_path=library,
++        song_manager=song_manager,
++        queue_manager=FakeQueueManager(),
++        get_now_playing=lambda: None,
++        max_bytes=6000,
++    )
++
++    removed = manager.trim()
++
++    assert len(removed) == 2
++    assert manager.library_size() == 5000
++
++
++def test_the_playing_song_is_kept(library):
++    """The song that is playing is never removed."""
++    song_manager = FakeSongManager()
++    playing = make_song(library, "playing.mp4", 5000, mtime=100)
++    make_song(library, "old.mp4", 5000, mtime=200)
++
++    manager = StorageManager(
++        download_path=library,
++        song_manager=song_manager,
++        queue_manager=FakeQueueManager(),
++        get_now_playing=lambda: playing,
++        max_bytes=1000,
++    )
++
++    removed = manager.trim()
++
++    assert playing not in removed
++    assert os.path.exists(playing)
++
++
++def test_queued_songs_are_kept(library):
++    """A song waiting in the queue is never removed."""
++    song_manager = FakeSongManager()
++    queued = make_song(library, "queued.mp4", 5000, mtime=100)
++    make_song(library, "old.mp4", 5000, mtime=200)
++
++    manager = StorageManager(
++        download_path=library,
++        song_manager=song_manager,
++        queue_manager=FakeQueueManager([queued]),
++        get_now_playing=lambda: None,
++        max_bytes=1000,
++    )
++
++    removed = manager.trim()
++
++    assert queued not in removed
++    assert os.path.exists(queued)
++
++
++def test_everything_protected_leaves_the_library_alone(library):
++    """When every song is playing or queued, nothing is removed."""
++    song_manager = FakeSongManager()
++    playing = make_song(library, "playing.mp4", 5000, mtime=100)
++    queued = make_song(library, "queued.mp4", 5000, mtime=200)
++
++    manager = StorageManager(
++        download_path=library,
++        song_manager=song_manager,
++        queue_manager=FakeQueueManager([queued]),
++        get_now_playing=lambda: playing,
++        max_bytes=1000,
++    )
++
++    assert manager.trim() == []
++    assert song_manager.deleted == []
++
++
++def test_sidecars_are_not_counted_as_songs(library):
++    """A lyric file next to a song does not count towards the limit."""
++    song_manager = FakeSongManager()
++    make_song(library, "a.mp4", 5000)
++    with open(os.path.join(library, "a.ass"), "w", encoding="utf-8") as f:
++        f.write("x" * 10000)
++
++    manager = StorageManager(
++        download_path=library,
++        song_manager=song_manager,
++        queue_manager=FakeQueueManager(),
++        get_now_playing=lambda: None,
++        max_bytes=10000,
++    )
++
++    assert manager.library_size() == 5000
++    assert manager.trim() == []
++
++
++def test_the_limit_is_read_from_the_callable(library):
++    """A limit changed at runtime takes effect on the next trim."""
++    song_manager = FakeSongManager()
++    make_song(library, "a.mp4", 5000)
++
++    limit = {"bytes": 10000}
++    manager = StorageManager(
++        download_path=library,
++        song_manager=song_manager,
++        queue_manager=FakeQueueManager(),
++        get_now_playing=lambda: None,
++        get_max_bytes=lambda: limit["bytes"],
++    )
++
++    assert manager.trim() == []
++
++    limit["bytes"] = 1000
++    assert len(manager.trim()) == 1
 diff --git a/tests/unit/test_stream_manager.py b/tests/unit/test_stream_manager.py
 index 19de72a..b37a1a2 100644
 --- a/tests/unit/test_stream_manager.py

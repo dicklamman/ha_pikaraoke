@@ -1,6 +1,6 @@
 ---
 name: PiKaraoke
-version: "1.23.6"
+version: "1.23.7"
 slug: pikaraoke
 description: YouTube-based karaoke machine, running as a Home Assistant add-on
 url: https://github.com/dicklamman/ha_pikaraoke
@@ -37,6 +37,7 @@ options:
   streaming_format: hls
   fetch_lyrics: true
   url: ""
+  max_storage_mb: 0
 schema:
   admin_password: password?
   song_folder: str
@@ -45,3 +46,4 @@ schema:
   streaming_format: list(hls|mp4)
   fetch_lyrics: bool
   url: str
+  max_storage_mb: int(0,)

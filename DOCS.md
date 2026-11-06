@@ -44,6 +44,7 @@ build fails with a clear conflict rather than producing a broken add-on.
 | `streaming_format` | `hls` (default) or `mp4`. |
 | `fetch_lyrics` | Fetch a downloaded song's captions from YouTube and save them next to it, so the lyrics appear on screen during playback. On by default. |
 | `url` | Override the address shown on the splash screen and in the QR code, for example `http://192.168.1.50:5555`. Only needed when the address the add-on works out is not the one to use. |
+| `max_storage_mb` | Maximum size of the song library, in megabytes. When the library grows past it, the oldest downloaded songs are removed after the next download. `0` means no limit. The same setting is on the Settings page. |
 
 ## Mappings
 
@@ -77,6 +78,30 @@ song plays.
 The captions come from YouTube itself. Human-authored captions are preferred
 over automatic ones, and the song's own language over a translation. A video
 with no reachable captions simply plays without lyrics.
+
+## Storage limit
+
+The song library is a folder of downloaded videos, and a video is tens of
+megabytes, so an evening of downloads fills a small disk. The `max_storage_mb`
+option keeps the library under a ceiling:
+
+```yaml
+max_storage_mb: 500
+```
+
+Whenever a download finishes and the library has grown past the limit, the
+oldest songs are removed until it fits again. The trim happens after the
+download, so the limit is reached before the next song is picked up rather
+than when the disk is already full. The limit is also checked at startup, so
+lowering it takes effect without waiting for the next download.
+
+The song that is playing is never removed, and neither is a song waiting in
+the queue: a singer does not lose their turn because the disk filled up. A
+song's lyrics and graphics are removed along with it, so trimming leaves no
+orphans behind.
+
+Set `max_storage_mb` to `0` for no limit, which is the default. The setting is
+also on the Settings page, next to the other download options.
 
 ## The Android player
 

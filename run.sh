@@ -27,6 +27,7 @@ defaults = {
     "streaming_format": "hls",
     "fetch_lyrics": True,
     "url": "",
+    "max_storage_mb": 0,
 }
 
 options = {}
@@ -78,6 +79,12 @@ fi
 
 if [ -n "${URL}" ]; then
     set -- "$@" --url "${URL}"
+fi
+
+# A limit of 0 means no limit. The flag is only passed when there is one, so
+# that PiKaraoke keeps whatever it has stored rather than being reset.
+if [ "${MAX_STORAGE_MB}" -gt 0 ] 2>/dev/null; then
+    set -- "$@" --max-storage-mb "${MAX_STORAGE_MB}"
 fi
 
 # The process has to run in the foreground, so the Supervisor can tell whether
