@@ -1,5 +1,5 @@
 diff --git a/pikaraoke/app.py b/pikaraoke/app.py
-index 896469e..0de5d1f 100644
+index 896469e..5d3b829 100644
 --- a/pikaraoke/app.py
 +++ b/pikaraoke/app.py
 @@ -17,6 +17,7 @@ from urllib.parse import quote, urlsplit
@@ -10,8 +10,11 @@ index 896469e..0de5d1f 100644
  from flask_babel import Babel
  from flask_socketio import SocketIO
  
-@@ -33,7 +34,7 @@ from pikaraoke.lib.get_platform import get_platform, has_js_runtime, is_windows
+@@ -31,9 +32,10 @@ from pikaraoke.lib.ffmpeg import is_ffmpeg_installed
+ from pikaraoke.lib.file_resolver import delete_tmp_dir
+ from pikaraoke.lib.get_platform import get_platform, has_js_runtime, is_windows
  from pikaraoke.lib.login_throttle import LoginThrottle
++from pikaraoke.lib.search_cache import SearchCache
  from pikaraoke.lib.singer_manager import SINGER_NAME_MAX_LENGTH
  from pikaraoke.lib.song_manager import SongManager
 -from pikaraoke.lib.url_prefix import BasePathMiddleware
@@ -19,7 +22,7 @@ index 896469e..0de5d1f 100644
  from pikaraoke.lib.youtube_dl import upgrade_youtubedl
  from pikaraoke.routes import API_BLUEPRINTS, INTERNAL_BLUEPRINTS
  from pikaraoke.routes.socket_events import setup_socket_events
-@@ -77,6 +78,22 @@ app.config["PIKARAOKE_BASE_PATH"] = args.base_path
+@@ -77,6 +79,22 @@ app.config["PIKARAOKE_BASE_PATH"] = args.base_path
  app.config["PIKARAOKE_SOCKETIO_PATH"] = socketio_path
  app.wsgi_app = BasePathMiddleware(app.wsgi_app, args.base_path)
  
@@ -42,7 +45,7 @@ index 896469e..0de5d1f 100644
  # Globals rather than per-route template args, so every page that extends
  # base.html agrees: it gates the admin-only nav links on is_admin and renders a
  # session ribbon from active_session_name, and singer_field gates KJ mode on
-@@ -151,11 +168,19 @@ def get_locale() -> str | None:
+@@ -151,11 +169,19 @@ def get_locale() -> str | None:
  
  @app.context_processor
  def inject_path_config() -> dict[str, object]:
@@ -66,7 +69,7 @@ index 896469e..0de5d1f 100644
          "singer_name_max_length": SINGER_NAME_MAX_LENGTH,
      }
  
-@@ -287,6 +312,17 @@ def main() -> None:
+@@ -287,6 +313,17 @@ def main() -> None:
      # reads a False as "flag not passed"), so persist the disable directly.
      if args.disable_autoplay:
          k.preferences.set("autoplay", False)
@@ -84,6 +87,17 @@ index 896469e..0de5d1f 100644
  
      # expose karaoke object to the flask app
      with app.app_context():
+@@ -309,6 +346,10 @@ def main() -> None:
+     app.secret_key = admin_auth.secret_key
+     app.config["ADMIN_AUTH"] = admin_auth
+     app.config["LOGIN_THROTTLE"] = LoginThrottle()
++    # The Add New page is rendered from scratch on every visit, and a YouTube
++    # search costs seconds of yt-dlp work. Recent searches are held so that
++    # returning to the page is instant and does not ask YouTube twice.
++    app.config["SEARCH_CACHE"] = SearchCache()
+ 
+     # Passing the flag persists it; omitting it keeps the stored one, empty clears it.
+     if args.admin_password is not None:
 diff --git a/pikaraoke/karaoke.py b/pikaraoke/karaoke.py
 index 7feb447..a20a24a 100644
 --- a/pikaraoke/karaoke.py
@@ -193,6 +207,30 @@ index bd43d22..1f49ff9 100644
      queue.add_argument(
          "--enable-fair-queue",
          action="store_true",
+diff --git a/pikaraoke/lib/current_app.py b/pikaraoke/lib/current_app.py
+index 29c6e99..280d7a1 100644
+--- a/pikaraoke/lib/current_app.py
++++ b/pikaraoke/lib/current_app.py
+@@ -10,6 +10,7 @@ from flask_socketio import emit
+ from pikaraoke.karaoke import Karaoke
+ from pikaraoke.lib.admin_auth import AdminAuth
+ from pikaraoke.lib.login_throttle import LoginThrottle
++from pikaraoke.lib.search_cache import SearchCache
+ 
+ 
+ def current_singer_name() -> str | None:
+@@ -70,6 +71,11 @@ def get_login_throttle() -> LoginThrottle:
+     return current_app.config["LOGIN_THROTTLE"]
+ 
+ 
++def get_search_cache() -> SearchCache:
++    """Get the current app's YouTube search result cache."""
++    return current_app.config["SEARCH_CACHE"]
++
++
+ def get_site_name() -> str:
+     """Get the site name from the current app's configuration
+     This function returns the site name stored in the current app's configuration.
 diff --git a/pikaraoke/lib/discovery.py b/pikaraoke/lib/discovery.py
 new file mode 100644
 index 0000000..8bd5a58
@@ -857,6 +895,92 @@ index e9d1b5d..2251aeb 100644
      def queue_clear(self) -> None:
          """Clear all songs from the queue and skip current song."""
          # MSG: Message shown after the queue is cleared
+diff --git a/pikaraoke/lib/search_cache.py b/pikaraoke/lib/search_cache.py
+new file mode 100644
+index 0000000..bf245f4
+--- /dev/null
++++ b/pikaraoke/lib/search_cache.py
+@@ -0,0 +1,80 @@
++"""A short-lived cache of YouTube search results.
++
++The Add New page is rendered from scratch every time it is visited, and a
++YouTube search costs seconds of yt-dlp work and a round trip to YouTube. This
++holds the most recent searches so that returning to the page is instant and
++does not ask YouTube the same question twice.
++
++In-memory and per-process on purpose: the results are a convenience, not
++state worth persisting, and a host restart clearing them is the intended
++reset.
++"""
++
++from __future__ import annotations
++
++import threading
++import time
++from collections import OrderedDict
++from collections.abc import Callable
++
++from pikaraoke.lib.youtube_dl import SearchResult
++
++# Long enough that a song hunt is not re-run for every trip to another menu,
++# short enough that a fresh hunt is not served stale results for hours.
++DEFAULT_TTL_SECONDS = 600.0
++
++# A handful of searches: enough for a party, few enough that a long evening
++# of hunting cannot grow this without bound.
++DEFAULT_MAX_ENTRIES = 16
++
++
++class SearchCache:
++    """Holds recent search results until they expire.
++
++    Keyed by the query actually sent to YouTube, so the same term searched with
++    and without non-karaoke matches keeps two entries.
++    """
++
++    def __init__(
++        self,
++        ttl_seconds: float = DEFAULT_TTL_SECONDS,
++        max_entries: int = DEFAULT_MAX_ENTRIES,
++        clock: Callable[[], float] = time.monotonic,
++    ) -> None:
++        self._ttl = ttl_seconds
++        self._max = max_entries
++        self._clock = clock
++        # Newest last, so the oldest is the one evicted.
++        self._entries: OrderedDict[str, tuple[float, list[SearchResult]]] = OrderedDict()
++        self._lock = threading.Lock()
++
++    def get(self, query: str) -> list[SearchResult] | None:
++        """The results for a query, or None when there are none to serve.
++
++        An entry past its time is dropped rather than served: the caller asks
++        YouTube again and puts the fresh results back.
++        """
++        with self._lock:
++            entry = self._entries.get(query)
++            if entry is None:
++                return None
++            stored_at, results = entry
++            if self._clock() - stored_at > self._ttl:
++                del self._entries[query]
++                return None
++            # A hit is a use, so it is the last to be evicted.
++            self._entries.move_to_end(query)
++            return results
++
++    def put(self, query: str, results: list[SearchResult]) -> None:
++        """Remember the results for a query, dropping the oldest if need be."""
++        with self._lock:
++            self._entries[query] = (self._clock(), list(results))
++            self._entries.move_to_end(query)
++            while len(self._entries) > self._max:
++                self._entries.popitem(last=False)
++
++    def clear(self) -> None:
++        """Forget everything. Used when the library changes enough to matter."""
++        with self._lock:
++            self._entries.clear()
 diff --git a/pikaraoke/lib/stream_manager.py b/pikaraoke/lib/stream_manager.py
 index c6175cd..fa1f724 100644
 --- a/pikaraoke/lib/stream_manager.py
@@ -1068,6 +1192,120 @@ index 836de6b..0886a70 100644
  @queue_api_bp.route("/api/queue/reorder", methods=["POST"])
  @queue_api_bp.arguments(ReorderForm, location="form")
  def reorder(form):
+diff --git a/pikaraoke/routes/search.py b/pikaraoke/routes/search.py
+index e2eea88..4f1cb61 100644
+--- a/pikaraoke/routes/search.py
++++ b/pikaraoke/routes/search.py
+@@ -2,18 +2,26 @@
+ 
+ from __future__ import annotations
+ 
++import logging
++
+ import flask_babel
+-from flask import render_template, request
++from flask import render_template, request, session
+ from flask_smorest import Blueprint
+ 
+ from pikaraoke.lib.auth import public
+-from pikaraoke.lib.current_app import get_karaoke_instance, get_site_name
++from pikaraoke.lib.current_app import get_karaoke_instance, get_search_cache, get_site_name
+ from pikaraoke.lib.youtube_dl import get_search_results
+ 
+ _ = flask_babel.gettext
+ 
+ search_bp = Blueprint("search", __name__)
+ 
++# The last search this browser ran, so returning to the page shows the results
++# again. In the session cookie rather than a server-side store, so it follows
++# the device rather than the room: two people hunting songs on the same box
++# must not share a result list.
++LAST_SEARCH_KEY = "last_search"
++
+ 
+ @search_bp.route("/search", methods=["GET"])
+ @public
+@@ -21,18 +29,61 @@ def search():
+     """YouTube search page."""
+     k = get_karaoke_instance()
+     site_name = get_site_name()
+-    search_string = request.args.get("search_string")
+-    if search_string:
+-        non_karaoke = request.args.get("non_karaoke") == "true"
+-        if non_karaoke:
+-            search_results = get_search_results(search_string)
+-        else:
+-            # Quoting makes the term a hard requirement, not a ranking hint:
+-            # 91% karaoke results against 82% unquoted, over 60 tail results.
+-            search_results = get_search_results(f'{search_string} "karaoke"')
+-    else:
++
++    # The switch is a preference of this device, so the cookie is its home.
++    cookie_non_karaoke = request.cookies.get("include-non-karaoke") == "true"
++
++    replaying = False
++    if request.args.get("clear") == "1":
++        # The Clear link asks for this: forget the search, so coming back to the
++        # page does not put the results up again.
++        session.pop(LAST_SEARCH_KEY, None)
+         search_string = None
+-        search_results = None
++        non_karaoke = cookie_non_karaoke
++    else:
++        search_string = request.args.get("search_string")
++        if search_string is None:
++            # A bare visit -- the menu link, or an SPA page swap back to this
++            # page. Replay the last search this browser ran, so the results are
++            # still there instead of an empty page that has to be searched again.
++            remembered = session.get(LAST_SEARCH_KEY) or {}
++            search_string = remembered.get("search_string")
++            non_karaoke = bool(remembered.get("non_karaoke"))
++            replaying = True
++        else:
++            # An explicit search. It names the switch it was run with, which is
++            # the same value the cookie holds.
++            non_karaoke = request.args.get("non_karaoke") == "true"
++
++    search_results = None
++    if search_string:
++        # The query as it goes to YouTube. Quoting makes the term a hard
++        # requirement, not a ranking hint: 91% karaoke results against 82%
++        # unquoted, over 60 tail results. The quoted form and the plain form are
++        # different questions, so they are cached separately.
++        query = search_string if non_karaoke else f'{search_string} "karaoke"'
++        cache = get_search_cache()
++        search_results = cache.get(query)
++        if search_results is None:
++            try:
++                search_results = get_search_results(query)
++            except Exception:
++                # A replay is not a fresh search: the user did not just ask for
++                # this, so a YouTube failure must not leave them on an error
++                # page. The term stays in the box and they can search again.
++                if not replaying:
++                    raise
++                logging.exception("Could not replay the last search")
++                search_results = []
++            else:
++                cache.put(query, search_results)
++        if search_results:
++            # Remembered so the next bare visit to this page shows these results.
++            session[LAST_SEARCH_KEY] = {
++                "search_string": search_string,
++                "non_karaoke": non_karaoke,
++            }
++
+     # A result already on this machine gets a queue action instead of a pointless
+     # second download. One indexed query for the page, not one per result.
+     library_matches = (
+@@ -48,4 +99,7 @@ def search():
+         search_results=search_results,
+         search_string=search_string,
+         library_matches=library_matches,
++        # The value the switch shows: the one the results on screen were found
++        # with, or the device's preference when there are no results.
++        non_karaoke=non_karaoke if search_string else cookie_non_karaoke,
+     )
 diff --git a/pikaraoke/routes/settings.py b/pikaraoke/routes/settings.py
 index d85a791..434296d 100644
 --- a/pikaraoke/routes/settings.py
@@ -1191,6 +1429,66 @@ index 1a4d86d..0c9de05 100644
  	</div>
  	<div>
  		<a class="button is-danger is-outlined confirm-clear" href="{{ request.script_root }}/api/queue/edit?action=clear">
+diff --git a/pikaraoke/templates/search.html b/pikaraoke/templates/search.html
+index 5f6d8d9..c1590df 100644
+--- a/pikaraoke/templates/search.html
++++ b/pikaraoke/templates/search.html
+@@ -201,6 +201,10 @@
+ 	$(function () {
+ 		const searchInput = document.getElementById("search_string_input");
+ 
++		// The term the results on screen were found with. The server renders it,
++		// so it survives a page swap that drops the query string.
++		const searchString = {{ (search_string or "") | tojson }};
++
+ 		$(".direct-download").click(function () {
+ 			const url = $("#direct-download-url").val();
+ 			if (!url) return;
+@@ -249,16 +253,24 @@
+ 			}
+ 		});
+ 
+-		$("#clear-search").on("click", function (e) {
+-			e.preventDefault();
++		$("#clear-search").on("click", function () {
++			// The link carries ?clear=1, which tells the server to forget the
++			// search, so coming back to this page does not put the results up
++			// again. The click is not cancelled: the SPA navigates to that URL
++			// for us, and without it the browser would.
+ 			searchInput.value = "";
+-			searchInput.focus();
+ 		});
+ 
+-		// re-populate the search field with the previous search term
++		// The search term comes from the server, which renders the one the results
++		// on screen were found with. It is also in the URL for a search run from
++		// this page, so a bookmark of a search still opens the same results.
+ 		const qSearchString = new URLSearchParams(window.location.search).get("search_string");
+ 		if (qSearchString) {
+ 			searchInput.value = qSearchString;
++		} else if (searchString) {
++			// A remembered search: the server replayed it, so the term goes back in
++			// the box and the results stay on screen.
++			searchInput.value = searchString;
+ 		} else {
+ 			// Only on a fresh page. Focusing a results page pops the mobile keyboard
+ 			// over the results the search just produced; Clear and tapping the box
+@@ -516,13 +528,13 @@
+ 		   form -- a disclosure rather than a setting, so it is a link, not a tickbox. #}
+ 		<div id="search-options" class="is-flex is-flex-wrap-wrap is-align-items-center is-row-gap-1 is-column-gap-3 mb-3">
+ 			<label class="checkbox">
+-				<input type="checkbox" class="switch" id="include-non-karaoke" name="include-non-karaoke" {% if request.cookies.get('include-non-karaoke') == 'true' %}checked{% endif %} />
++				<input type="checkbox" class="switch" id="include-non-karaoke" name="include-non-karaoke" {% if non_karaoke %}checked{% endif %} />
+ 				{# MSG: Checkbox label which enables matching songs which are not karaoke versions (i.e. the songs still
+ 				have a singer and are not just instrumentals.) #} {% trans %}Include non-karaoke matches{% endtrans %}
+ 			</label>
+ 			<span class="is-inline-flex is-align-items-center is-gap-2.5 ml-auto">
+ 				{# MSG: Link which clears the text from the search box. #}
+-				<a id="clear-search" class="has-text-danger">{% trans %}Clear{% endtrans %}</a>
++				<a id="clear-search" class="has-text-danger" href="{{ url_for('search.search') }}?clear=1">{% trans %}Clear{% endtrans %}</a>
+ 				{# MSG: Link which reveals the direct-URL download form. #}
+ 				<a id="show-advanced" aria-expanded="false">{% trans %}Advanced{% endtrans %}</a>
+ 			</span>
 diff --git a/pikaraoke/templates/settings.html b/pikaraoke/templates/settings.html
 index 33a7801..ce4beef 100644
 --- a/pikaraoke/templates/settings.html
@@ -1693,10 +1991,28 @@ index 942c48a..78d53dc 100644
  #: templates/queue.html:589
  msgid "Play Next"
 diff --git a/tests/conftest.py b/tests/conftest.py
-index 194ea24..62b1720 100644
+index 194ea24..ca67812 100644
 --- a/tests/conftest.py
 +++ b/tests/conftest.py
-@@ -266,6 +266,20 @@ class MockKeepAwake:
+@@ -14,6 +14,7 @@ from pikaraoke.lib.events import EventSystem
+ from pikaraoke.lib.karaoke_database import KaraokeDatabase
+ from pikaraoke.lib.preference_manager import PreferenceManager
+ from pikaraoke.lib.queue_manager import QueueManager
++from pikaraoke.lib.search_cache import SearchCache
+ from pikaraoke.lib.song_manager import SongManager
+ 
+ PIKARAOKE_PACKAGE = Path(__file__).resolve().parent.parent / "pikaraoke"
+@@ -67,6 +68,9 @@ def make_route_app(blueprint, linked_endpoints, admin: bool = True):
+     app = Flask(__name__, template_folder=str(PIKARAOKE_PACKAGE / "templates"))
+     app.secret_key = "test"
+     app.config["ADMIN_AUTH"] = StubAdminAuth(admin)
++    # The search page reads the result cache, so a route test gets a real one
++    # rather than a missing config key.
++    app.config["SEARCH_CACHE"] = SearchCache()
+     Babel(app)
+     app.register_blueprint(blueprint)
+     endpoints = {endpoint: rule for rule, endpoint in _BASE_TEMPLATE_ENDPOINTS}
+@@ -266,6 +270,20 @@ class MockKeepAwake:
          self.active = False
  
  
@@ -1717,7 +2033,7 @@ index 194ea24..62b1720 100644
  class MockKaraoke:
      """Minimal mock of the Karaoke class for testing queue operations.
  
-@@ -278,6 +292,7 @@ class MockKaraoke:
+@@ -278,6 +296,7 @@ class MockKaraoke:
          self.sound_manager = MockSoundManager()
          self.db = KaraokeDatabase(str(tmp_path / "test.db"))
          self._keep_awake = MockKeepAwake()
@@ -2567,6 +2883,192 @@ index 47c81bc..3f8a94f 100644
      @patch("pikaraoke.routes.queue_api.get_karaoke_instance")
      def test_delete_download_error(self, mock_get_instance, client):
          """Test the delete_download_error route."""
+diff --git a/tests/unit/test_search_routes.py b/tests/unit/test_search_routes.py
+index b76f2a9..d7847f9 100644
+--- a/tests/unit/test_search_routes.py
++++ b/tests/unit/test_search_routes.py
+@@ -1,6 +1,7 @@
+ """Tests for the Add New page: it acquires songs and flags ones already held."""
+ 
+ import json
++from contextlib import contextmanager
+ from unittest.mock import MagicMock, patch
+ 
+ import pytest
+@@ -130,6 +131,173 @@ class TestLibraryMatches:
+         assert "Chan" in rows
+ 
+ 
++class TestSearchSurvivesNavigation:
++    """The results stay on screen when another menu is opened and this one comes
++    back. The SPA swaps the page without a reload, so the page it fetches is a
++    bare /search -- the results have to come back on their own."""
++
++    @contextmanager
++    def _youtube(self, results):
++        """Stands in for YouTube for the duration of the block."""
++        k = MagicMock()
++        k.db.get_paths_by_youtube_ids.return_value = {}
++        with (
++            patch("pikaraoke.routes.search.get_karaoke_instance", return_value=k),
++            patch("pikaraoke.routes.search.get_site_name", return_value="PiKaraoke"),
++            patch(
++                "pikaraoke.routes.search.get_search_results", return_value=results
++            ) as search,
++        ):
++            yield search
++
++    def test_a_bare_visit_replays_the_last_search(self, client):
++        """The menu link, and the SPA page swap, both fetch a bare /search."""
++        with self._youtube([MISSING]):
++            client.get("/search?search_string=abba")
++
++            response = client.get("/search")
++        rows = _rows(response)
++        assert 'data-ytTitle="Missing Song"' in rows
++        assert "Search results for" in response.data.decode()
++
++    def test_the_term_goes_back_in_the_box(self, client):
++        with self._youtube([MISSING]):
++            client.get("/search?search_string=abba")
++
++            body = client.get("/search").data.decode()
++        # The script puts the server's term back into the input, so the box
++        # does not read empty while the results are on screen.
++        assert "searchString" in body
++
++    def test_the_results_are_not_fetched_again(self, client):
++        """A replay must not ask YouTube a second time: it costs seconds and
++        the results are already in hand."""
++        with self._youtube([MISSING]) as search:
++            client.get("/search?search_string=abba")
++            assert search.call_count == 1
++
++            client.get("/search")
++            assert search.call_count == 1
++
++    def test_a_fresh_search_replaces_the_remembered_one(self, client):
++        with self._youtube([MISSING]):
++            client.get("/search?search_string=abba")
++
++        with self._youtube([HELD]) as search:
++            client.get("/search?search_string=bjork")
++
++            rows = _rows(client.get("/search"))
++        assert 'data-ytTitle="Held Song"' in rows
++        assert search.call_count == 1
++
++    def test_clear_forgets_the_search(self, client):
++        """The Clear link asks for this: the results go, and coming back does
++        not put them up again."""
++        with self._youtube([MISSING]):
++            client.get("/search?search_string=abba")
++
++            cleared = client.get("/search?clear=1")
++            assert '<ul id="search-results"' not in cleared.data.decode()
++
++            body = client.get("/search").data.decode()
++        assert '<ul id="search-results"' not in body
++
++    def test_the_non_karaoke_switch_is_remembered(self, client):
++        """The results on screen were found with it on, so the switch has to
++        show it on when the page comes back."""
++        with self._youtube([MISSING]) as search:
++            client.get("/search?search_string=abba&non_karaoke=true")
++
++            # The plain form was asked for, so the switch is on.
++            body = client.get("/search").data.decode()
++        assert 'id="include-non-karaoke"' in body
++        assert "checked" in body.split('id="include-non-karaoke"')[1][:200]
++        # The unquoted query is what was run, so the quoted one was not.
++        assert search.call_args[0][0] == "abba"
++
++    def test_a_failed_replay_does_not_error_the_page(self, app, client):
++        """A replay is not a fresh search: the user did not just ask for it, so
++        a YouTube failure must not leave them on an error page."""
++        with self._youtube([MISSING]):
++            client.get("/search?search_string=abba")
++
++        # The cache entry has expired, so the replay has to ask YouTube again.
++        app.config["SEARCH_CACHE"].clear()
++        with (
++            patch("pikaraoke.routes.search.get_karaoke_instance", return_value=MagicMock()),
++            patch("pikaraoke.routes.search.get_site_name", return_value="PiKaraoke"),
++            patch(
++                "pikaraoke.routes.search.get_search_results", side_effect=RuntimeError("no network")
++            ),
++        ):
++            response = client.get("/search")
++        assert response.status_code == 200
++        assert '<ul id="search-results"' not in response.data.decode()
++
++    def test_a_failed_fresh_search_does_error_the_page(self, client):
++        """A search the user just asked for is a real failure, and saying so is
++        better than showing an empty result list."""
++        with (
++            patch("pikaraoke.routes.search.get_karaoke_instance", return_value=MagicMock()),
++            patch("pikaraoke.routes.search.get_site_name", return_value="PiKaraoke"),
++            patch(
++                "pikaraoke.routes.search.get_search_results", side_effect=RuntimeError("no network")
++            ),
++        ):
++            response = client.get("/search?search_string=abba")
++        assert response.status_code == 500
++
++
++class TestSearchCache:
++    """The result cache: the same question is not asked of YouTube twice."""
++
++    def test_a_repeat_query_is_served_from_the_cache(self):
++        from pikaraoke.lib.search_cache import SearchCache
++
++        cache = SearchCache()
++        cache.put("abba", [MISSING])
++        assert cache.get("abba") == [MISSING]
++
++    def test_an_unknown_query_misses(self):
++        from pikaraoke.lib.search_cache import SearchCache
++
++        assert SearchCache().get("abba") is None
++
++    def test_an_expired_entry_misses(self):
++        from pikaraoke.lib.search_cache import SearchCache
++
++        now = [0.0]
++        cache = SearchCache(ttl_seconds=10, clock=lambda: now[0])
++        cache.put("abba", [MISSING])
++
++        now[0] = 11.0
++        assert cache.get("abba") is None
++
++    def test_the_oldest_entry_is_evicted(self):
++        from pikaraoke.lib.search_cache import SearchCache
++
++        cache = SearchCache(max_entries=2)
++        cache.put("one", [MISSING])
++        cache.put("two", [MISSING])
++        cache.put("three", [MISSING])
++
++        assert cache.get("one") is None
++        assert cache.get("three") == [MISSING]
++
++    def test_a_hit_refreshes_the_entry(self):
++        """A query in use should not be the next one evicted."""
++        from pikaraoke.lib.search_cache import SearchCache
++
++        cache = SearchCache(max_entries=2)
++        cache.put("one", [MISSING])
++        cache.put("two", [MISSING])
++        cache.get("one")
++        cache.put("three", [MISSING])
++
++        assert cache.get("one") == [MISSING]
++        assert cache.get("two") is None
++
++
+ class TestDownloadRequiresName:
+     """A download must carry a name, the same invariant as the queue add: the
+     song is attributed the moment it is requested."""
 diff --git a/tests/unit/test_state_changing_methods.py b/tests/unit/test_state_changing_methods.py
 index 5f6c642..db199c4 100644
 --- a/tests/unit/test_state_changing_methods.py

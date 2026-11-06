@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.23.6
+
+- Keep the search results on the "Add New" page when another menu is opened
+  and the page comes back.
+  - The results used to vanish. The page is swapped in without a reload, and
+    the swap asks the server for a bare `/search`, which carried no search
+    term, so the page came back empty and the hunt had to start again.
+  - The search this browser last ran is now remembered, and a bare visit to
+    the page replays it. The results are back on screen, and the term is
+    back in the search box.
+  - The reminder is per device, not per room. It lives in the session
+    cookie, so two people hunting songs on the same box each keep their own
+    result list rather than sharing one.
+  - The results are held for ten minutes, so coming back is instant and
+    YouTube is not asked the same question twice. A fresh search always
+    replaces what is held.
+  - "Clear" now clears the results as well as the box, so the page does not
+    bring them back on the next visit.
+
 ## 1.23.5
 
 - Keep the "Up next:" announcement on the splash screen to a single line.
